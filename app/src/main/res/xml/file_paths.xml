@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <cache-path name="attachments" path="attachments/" />
+    <!-- Картинки из текста письма (открыть в другом приложении) -->
+    <cache-path name="images" path="images/" />
+    <!-- Загруженная новая версия приложения (для системного установщика) -->
+    <cache-path name="updates" path="updates/" />
+</paths>

@@ -1,0 +1,345 @@
+package io.github.denhaiz.exmail.ui
+
+import android.Manifest
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CalendarMonth
+import androidx.compose.material.icons.filled.Contacts
+import androidx.compose.material.icons.filled.Mail
+import androidx.compose.material.icons.outlined.CalendarMonth
+import androidx.compose.material.icons.outlined.Contacts
+import androidx.compose.material.icons.outlined.Mail
+import androidx.compose.material.icons.outlined.NotificationsActive
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import androidx.navigation.NavGraph.Companion.findStartDestination
+import androidx.navigation.NavHostController
+import androidx.navigation.NavType
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
+import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.launch
+import io.github.denhaiz.exmail.data.AccountStore
+import io.github.denhaiz.exmail.data.AppSettings
+import io.github.denhaiz.exmail.sync.PushController
+import io.github.denhaiz.exmail.ui.calendar.CalendarScreen
+import io.github.denhaiz.exmail.ui.calendar.EventEditScreen
+import io.github.denhaiz.exmail.ui.calendar.EventScreen
+import io.github.denhaiz.exmail.ui.common.LocalAppScope
+import io.github.denhaiz.exmail.ui.common.Motion
+import io.github.denhaiz.exmail.ui.contacts.ContactDetailScreen
+import io.github.denhaiz.exmail.ui.contacts.ContactsScreen
+import io.github.denhaiz.exmail.ui.mail.ComposeScreen
+import io.github.denhaiz.exmail.ui.mail.MailListScreen
+import io.github.denhaiz.exmail.ui.mail.MessageScreen
+import io.github.denhaiz.exmail.ui.settings.SettingsScreen
+import java.time.LocalDate
+import javax.inject.Inject
+
+private data class Tab(val route: String, val label: String, val icon: ImageVector, val selectedIcon: ImageVector)
+
+private val allTabs = mapOf(
+    "mail" to Tab("mail", "Почта", Icons.Outlined.Mail, Icons.Filled.Mail),
+    "calendar" to Tab("calendar", "Календарь", Icons.Outlined.CalendarMonth, Icons.Filled.CalendarMonth),
+    "contacts" to Tab("contacts", "Контакты", Icons.Outlined.Contacts, Icons.Filled.Contacts),
+)
+
+private fun enc(s: String) = Uri.encode(s)
+
+object Routes {
+    /** [browse] = false — письмо из поиска: свайп не листает папку. */
+    fun message(id: String, browse: Boolean = true) = "message/${enc(id)}?browse=${if (browse) 1 else 0}"
+    fun compose(mode: String = "new", ref: String = "", to: String = "") = "compose?mode=$mode&ref=${enc(ref)}&to=${enc(to)}"
+    fun event(id: String) = "event/${enc(id)}"
+    fun eventEdit(id: String = "", date: LocalDate? = null, to: String = "") = "eventEdit?id=${enc(id)}&date=${date ?: ""}&to=${enc(to)}"
+    fun contact(email: String, id: String? = null) = "contact/${enc(email)}?id=${enc(id.orEmpty())}"
+}
+
+@HiltViewModel
+class AppNavViewModel @Inject constructor(private val store: AccountStore, val push: PushController) : ViewModel() {
+    val settings = store.settings
+
+    fun batteryAsked() = viewModelScope.launch { store.setBatteryAsked() }
+}
+
+@Composable
+fun AppNav(
+    openMessageId: String?,
+    onMessageOpened: () -> Unit,
+    /** Нажато уведомление о новой версии — открыть настройки с предложением обновиться. */
+    openUpdate: Boolean = false,
+    onUpdateOpened: () -> Unit = {},
+    navVm: AppNavViewModel = hiltViewModel(),
+) {
+    val settings by navVm.settings.collectAsState(initial = AppSettings())
+    val nav = rememberNavController()
+    val snackbar = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+    val backStack by nav.currentBackStackEntryAsState()
+    val route = backStack?.destination?.route
+    val tabs = settings.tabOrder.mapNotNull { allTabs[it] }
+    val tabOrder by rememberUpdatedState(tabs.map { it.route })
+    val motion = remember { Motion.Nav(tabOrder = { tabOrder }, zoomRoutes = { it?.startsWith("message/") == true }) }
+    val context = LocalContext.current
+
+    // Разрешение на уведомления (Android 13+) — спрашиваем, только если ещё не выдано
+    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { navVm.push.syncAsync() }
+    var askBattery by remember { mutableStateOf(false) }
+    // Один раз объясняем, зачем снимать ограничения работы в фоне (иначе Android может отключать доставку писем)
+    LaunchedEffect(settings.instantPush, settings.notifications, settings.batteryAsked) {
+        askBattery = settings.instantPush && settings.notifications && !settings.batteryAsked && !navVm.push.isUnrestricted()
+    }
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) permission.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+    LaunchedEffect(openMessageId) {
+        if (openMessageId != null) {
+            nav.navigate(Routes.message(openMessageId))
+            onMessageOpened()
+        }
+    }
+    LaunchedEffect(openUpdate) {
+        if (openUpdate) {
+            nav.navigate("settings?update=1")
+            onUpdateOpened()
+        }
+    }
+
+    if (askBattery) {
+        AlertDialog(
+            onDismissRequest = { askBattery = false; navVm.batteryAsked() },
+            icon = { Icon(Icons.Outlined.NotificationsActive, null) },
+            title = { Text("Письма — сразу") },
+            text = {
+                Text(
+                    "Чтобы уведомления о новых письмах приходили без задержек, разрешите ExMail работать в фоне без ограничений. " +
+                        "Иначе Android может отключать подключение к почте для экономии заряда. Изменить можно в настройках приложения.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    askBattery = false
+                    navVm.batteryAsked()
+                    runCatching { context.startActivity(navVm.push.unrestrictIntent()) }
+                }) { Text("Разрешить") }
+            },
+            dismissButton = { TextButton(onClick = { askBattery = false; navVm.batteryAsked() }) { Text("Не сейчас") } },
+        )
+    }
+
+    fun toast(text: String) {
+        scope.launch { snackbar.showSnackbar(text) }
+    }
+
+    // Нижняя панель лежит поверх экранов и уезжает вниз при открытии письма. Экраны вкладок всегда оставляют
+    // под неё место, поэтому при переходах ничего не меняет размер (не «прыгают» кнопки и списки).
+    val barPadding = PaddingValues(bottom = NAV_BAR_HEIGHT + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding())
+    val tabPage = Modifier.padding(barPadding).consumeWindowInsets(barPadding)
+    val showBar = route == null || tabs.any { it.route == route }
+
+    Scaffold(contentWindowInsets = WindowInsets(0)) { padding ->
+        CompositionLocalProvider(LocalAppScope provides scope) {
+            Box(Modifier.padding(padding).fillMaxSize()) {
+                NavHost(
+                    nav,
+                    startDestination = "mail",
+                    modifier = Modifier.fillMaxSize(),
+                    enterTransition = motion.enter,
+                    exitTransition = motion.exit,
+                    popEnterTransition = motion.popEnter,
+                    popExitTransition = motion.popExit,
+                ) {
+                    composable("mail") {
+                        Box(tabPage) {
+                            MailListScreen(
+                                onOpenMessage = { id, browse -> nav.navigate(Routes.message(id, browse)) },
+                                onOpenDraft = { nav.navigate(Routes.compose("draft", it)) },
+                                onCompose = { nav.navigate(Routes.compose()) },
+                                onReply = { id, mode -> nav.navigate(Routes.compose(mode, id)) },
+                                onSettings = { nav.navigate("settings") },
+                                onOpenTab = { nav.switchTab(it) },
+                                snackbar = snackbar,
+                            )
+                        }
+                    }
+                    composable("calendar") {
+                        Box(tabPage) {
+                            CalendarScreen(
+                                onOpenEvent = { nav.navigate(Routes.event(it)) },
+                                onNewEvent = { nav.navigate(Routes.eventEdit(date = it)) },
+                                snackbar = snackbar,
+                            )
+                        }
+                    }
+                    composable("contacts") {
+                        Box(tabPage) {
+                            ContactsScreen(onOpen = { email, id -> nav.navigate(Routes.contact(email, id)) })
+                        }
+                    }
+                    composable(
+                        MESSAGE_ROUTE,
+                        arguments = listOf(
+                            navArgument("id") { type = NavType.StringType },
+                            navArgument("browse") { type = NavType.StringType; defaultValue = "1" },
+                        ),
+                    ) {
+                        MessageScreen(
+                            onBack = { nav.popBackStack() },
+                            onReply = { id, mode -> nav.navigate(Routes.compose(mode, id)) },
+                            onComposeTo = { nav.navigate(Routes.compose(to = it)) },
+                            onOpenContact = { nav.navigate(Routes.contact(it)) },
+                            snackbar = snackbar,
+                            onOpenSibling = { id, direction ->
+                                Motion.openSibling(direction)
+                                // Соседнее письмо заменяет текущее: «Назад» возвращает в список
+                                nav.navigate(Routes.message(id)) { popUpTo(MESSAGE_ROUTE) { inclusive = true } }
+                            },
+                        )
+                    }
+                    composable(
+                        "compose?mode={mode}&ref={ref}&to={to}",
+                        arguments = listOf(
+                            navArgument("mode") { type = NavType.StringType; defaultValue = "new" },
+                            navArgument("ref") { type = NavType.StringType; defaultValue = "" },
+                            navArgument("to") { type = NavType.StringType; defaultValue = "" },
+                        ),
+                    ) {
+                        ComposeScreen(
+                            onClose = { nav.popBackStack() },
+                            onSent = {
+                                nav.popBackStack()
+                                toast("Письмо отправлено")
+                            },
+                            onDraftSaved = {
+                                nav.popBackStack()
+                                toast("Черновик сохранён")
+                            },
+                        )
+                    }
+                    composable("event/{id}", arguments = listOf(navArgument("id") { type = NavType.StringType })) {
+                        EventScreen(
+                            onBack = { nav.popBackStack() },
+                            onEdit = { nav.navigate(Routes.eventEdit(id = it)) },
+                            onContact = { nav.navigate(Routes.contact(it)) },
+                            onMailto = { nav.navigate(Routes.compose(to = it)) },
+                            snackbar = snackbar,
+                        )
+                    }
+                    composable(
+                        "eventEdit?id={id}&date={date}&to={to}",
+                        arguments = listOf(
+                            navArgument("id") { type = NavType.StringType; defaultValue = "" },
+                            navArgument("date") { type = NavType.StringType; defaultValue = "" },
+                            navArgument("to") { type = NavType.StringType; defaultValue = "" },
+                        ),
+                    ) {
+                        EventEditScreen(
+                            onClose = { nav.popBackStack() },
+                            onSaved = { msg ->
+                                // После изменения возвращаемся в календарь (карточка события могла устареть)
+                                if (!nav.popBackStack("calendar", inclusive = false)) nav.switchTab("calendar")
+                                if (msg.isNotBlank()) toast(msg)
+                            },
+                        )
+                    }
+                    composable(
+                        "contact/{email}?id={id}",
+                        arguments = listOf(
+                            navArgument("email") { type = NavType.StringType },
+                            navArgument("id") { type = NavType.StringType; defaultValue = "" },
+                        ),
+                    ) {
+                        ContactDetailScreen(
+                            onBack = { nav.popBackStack() },
+                            onWrite = { nav.navigate(Routes.compose(to = it)) },
+                            onMeeting = { nav.navigate(Routes.eventEdit(date = LocalDate.now(), to = it)) },
+                        )
+                    }
+                    composable(
+                        "settings?update={update}",
+                        arguments = listOf(navArgument("update") { type = NavType.StringType; defaultValue = "0" }),
+                    ) { entry ->
+                        SettingsScreen(onBack = { nav.popBackStack() }, offerUpdate = entry.arguments?.getString("update") == "1")
+                    }
+                }
+                AnimatedVisibility(
+                    visible = showBar,
+                    enter = slideInVertically(tween(Motion.MEDIUM)) { it },
+                    exit = slideOutVertically(tween(Motion.MEDIUM)) { it },
+                    modifier = Modifier.align(Alignment.BottomCenter),
+                ) {
+                    NavigationBar {
+                        tabs.forEach { t ->
+                            val selected = route == t.route
+                            NavigationBarItem(
+                                selected = selected,
+                                onClick = { nav.switchTab(t.route) },
+                                icon = { Icon(if (selected) t.selectedIcon else t.icon, null) },
+                                label = { Text(t.label, maxLines = 1) },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private const val MESSAGE_ROUTE = "message/{id}?browse={browse}"
+
+/** Высота нижней панели вкладок Material 3 (без системной полосы навигации). */
+private val NAV_BAR_HEIGHT = 80.dp
+
+private fun NavHostController.switchTab(route: String) {
+    navigate(route) {
+        popUpTo(graph.findStartDestination().id) { saveState = true }
+        launchSingleTop = true
+        restoreState = true
+    }
+}

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ExMail</string>
+    <string name="channel_new_mail">Новые письма</string>
+    <string name="channel_new_mail_desc">Уведомления о новых письмах во «Входящих»</string>
+</resources>

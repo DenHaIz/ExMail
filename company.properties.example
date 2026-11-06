@@ -1,0 +1,7 @@
+# Сервер организации по умолчанию. Скопируйте в company.properties (файл не коммитится) и укажите свои значения.
+# Без company.properties приложение находит сервер по рабочему e-mail при входе.
+#
+# Адрес EWS: при входе достаточно логина и пароля.
+ewsUrl=https://mail.example.com/EWS/Exchange.asmx
+# Домен почты: короткий логин ivanov дополняется до ivanov@example.com.
+mailDomain=example.com

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Body>
+    <m:ResolveNamesResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages" xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+      <m:ResponseMessages>
+        <m:ResolveNamesResponseMessage ResponseClass="Warning">
+          <m:MessageText>Multiple results were found.</m:MessageText>
+          <m:ResponseCode>ErrorNameResolutionMultipleResults</m:ResponseCode>
+          <m:DescriptiveLinkKey>0</m:DescriptiveLinkKey>
+          <m:ResolutionSet TotalItemsInView="2" IncludesLastItemInRange="true">
+            <t:Resolution>
+              <t:Mailbox>
+                <t:Name>Иван Петров</t:Name>
+                <t:EmailAddress>ivan.petrov@example.com</t:EmailAddress>
+                <t:RoutingType>SMTP</t:RoutingType>
+                <t:MailboxType>Mailbox</t:MailboxType>
+              </t:Mailbox>
+              <t:Contact>
+                <t:DisplayName>Иван Петров</t:DisplayName>
+                <t:GivenName>Иван</t:GivenName>
+                <t:EmailAddresses>
+                  <t:Entry Key="EmailAddress1">SMTP:ivan.petrov@example.com</t:Entry>
+                </t:EmailAddresses>
+                <t:PhoneNumbers>
+                  <t:Entry Key="BusinessPhone">+7 495 000-00-00</t:Entry>
+                  <t:Entry Key="MobilePhone">+7 900 000-00-00</t:Entry>
+                  <t:Entry Key="HomePhone"/>
+                </t:PhoneNumbers>
+                <t:JobTitle>Главный бухгалтер</t:JobTitle>
+                <t:Department>Бухгалтерия</t:Department>
+                <t:OfficeLocation>Москва, к. 305</t:OfficeLocation>
+              </t:Contact>
+            </t:Resolution>
+            <t:Resolution>
+              <t:Mailbox>
+                <t:Name>Иванова Мария</t:Name>
+                <t:EmailAddress>m.ivanova@example.com</t:EmailAddress>
+                <t:RoutingType>SMTP</t:RoutingType>
+                <t:MailboxType>Mailbox</t:MailboxType>
+              </t:Mailbox>
+            </t:Resolution>
+          </m:ResolutionSet>
+        </m:ResolveNamesResponseMessage>
+      </m:ResponseMessages>
+    </m:ResolveNamesResponse>
+  </s:Body>
+</s:Envelope>

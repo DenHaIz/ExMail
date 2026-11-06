@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Фон окна при запуске в тёмной теме — без белой вспышки до первого кадра -->
+    <color name="brand_background">#111418</color>
+</resources>

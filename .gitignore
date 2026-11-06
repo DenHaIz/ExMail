@@ -1,0 +1,12 @@
+.toolchain/
+.gradle/
+.idea/
+.kotlin/
+build/
+local.properties
+*.iml
+*.keystore
+*.jks
+keystore.properties
+company.properties
+private/

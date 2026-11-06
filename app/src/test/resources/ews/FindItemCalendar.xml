@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Body>
+    <m:FindItemResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages" xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+      <m:ResponseMessages>
+        <m:FindItemResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:RootFolder TotalItemsInView="1" IncludesLastItemInRange="true">
+            <t:Items>
+              <t:CalendarItem>
+                <t:ItemId Id="CAL1" ChangeKey="DwAA"/>
+                <t:Subject>Планёрка</t:Subject>
+                <t:Start>2026-11-03T07:00:00Z</t:Start>
+                <t:End>2026-11-03T07:30:00Z</t:End>
+                <t:IsAllDayEvent>false</t:IsAllDayEvent>
+                <t:LegacyFreeBusyStatus>Busy</t:LegacyFreeBusyStatus>
+                <t:Location>Переговорная 3</t:Location>
+                <t:IsMeeting>true</t:IsMeeting>
+                <t:IsCancelled>false</t:IsCancelled>
+                <t:IsRecurring>true</t:IsRecurring>
+                <t:MyResponseType>Accept</t:MyResponseType>
+                <t:Organizer><t:Mailbox><t:Name>Олег</t:Name><t:EmailAddress>oleg@example.com</t:EmailAddress></t:Mailbox></t:Organizer>
+              </t:CalendarItem>
+            </t:Items>
+          </m:RootFolder>
+        </m:FindItemResponseMessage>
+      </m:ResponseMessages>
+    </m:FindItemResponse>
+  </s:Body>
+</s:Envelope>

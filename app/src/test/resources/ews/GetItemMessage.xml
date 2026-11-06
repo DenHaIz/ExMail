@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Body>
+    <m:GetItemResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages" xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+      <m:ResponseMessages>
+        <m:GetItemResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:Items>
+            <t:Message>
+              <t:ItemId Id="AAMk1" ChangeKey="CQAA1"/>
+              <t:ParentFolderId Id="INBOXID" ChangeKey="AQAA"/>
+              <t:ItemClass>IPM.Note</t:ItemClass>
+              <t:Subject>Квартальный отчёт</t:Subject>
+              <t:Body BodyType="HTML">&lt;html&gt;&lt;body&gt;&lt;b&gt;Привет&lt;/b&gt;&lt;img src="cid:image001.png@01DA"&gt;&lt;/body&gt;&lt;/html&gt;</t:Body>
+              <t:Attachments>
+                <t:FileAttachment>
+                  <t:AttachmentId Id="ATT1"/>
+                  <t:Name>отчёт.xlsx</t:Name>
+                  <t:ContentType>application/vnd.openxmlformats-officedocument.spreadsheetml.sheet</t:ContentType>
+                  <t:Size>23456</t:Size>
+                  <t:IsInline>false</t:IsInline>
+                </t:FileAttachment>
+                <t:FileAttachment>
+                  <t:AttachmentId Id="ATT2"/>
+                  <t:Name>image001.png</t:Name>
+                  <t:ContentType>image/png</t:ContentType>
+                  <t:ContentId>image001.png@01DA</t:ContentId>
+                  <t:Size>1200</t:Size>
+                  <t:IsInline>true</t:IsInline>
+                </t:FileAttachment>
+              </t:Attachments>
+              <t:DateTimeReceived>2026-11-02T08:15:00Z</t:DateTimeReceived>
+              <t:Importance>High</t:Importance>
+              <t:ToRecipients>
+                <t:Mailbox><t:Name>Анна Смирнова</t:Name><t:EmailAddress>anna@example.com</t:EmailAddress></t:Mailbox>
+                <t:Mailbox><t:Name>Олег</t:Name><t:EmailAddress>oleg@example.com</t:EmailAddress></t:Mailbox>
+              </t:ToRecipients>
+              <t:CcRecipients>
+                <t:Mailbox><t:Name>Шеф</t:Name><t:EmailAddress>boss@example.com</t:EmailAddress></t:Mailbox>
+              </t:CcRecipients>
+              <t:IsRead>true</t:IsRead>
+              <t:From><t:Mailbox><t:Name>Иван Петров</t:Name><t:EmailAddress>ivan.petrov@example.com</t:EmailAddress></t:Mailbox></t:From>
+            </t:Message>
+          </m:Items>
+        </m:GetItemResponseMessage>
+      </m:ResponseMessages>
+    </m:GetItemResponse>
+  </s:Body>
+</s:Envelope>
