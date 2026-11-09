@@ -66,7 +66,10 @@ Exchange; доработки по отзывам пользователей оп
 **Как выпускать следующие версии:** поднять `versionCode` и `versionName` в `app/build.gradle.kts`, собрать
 `assembleRelease` тем же ключом (без `company.properties`), создать тег-зеркало `apk-v<versionName>` — отдельный
 коммит без родителей с одним файлом `ExMail.apk` (`git hash-object -w` → `git mktree` → `git commit-tree` → `git tag`,
-отправить тег), затем выпуск `v<versionName>` с APK, пометить Latest. Описание выпуска (Markdown:
+отправить тег), затем выпуск `v<versionName>` с APK, пометить Latest. Проверить: `curl -sL https://cdn.jsdelivr.net/gh/DenHaIz/ExMail@apk-v<версия>/ExMail.apk`
+отдаёт тот же файл. В Windows ввод для `git mktree` — без `` (из Python — байтами): иначе имя файла станет «ExMail.apk»,
+а jsDelivr надолго запомнит тег без файла (так вышло с `apk-v1.0.2`; зеркало этой версии не используется — оно нужно
+только для обновления с неё на следующую). Описание выпуска (Markdown:
 `**жирный**`, списки `- `) показывается в диалоге обновления без разметки; строка «Подробности…» опускается.
 
 ## 1c. Жесты в списке, поиск по дате (до перезапуска)
