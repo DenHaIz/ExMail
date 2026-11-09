@@ -16,6 +16,7 @@ import okhttp3.Callback
 import okhttp3.ConnectionPool
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.ResponseBody.Companion.toResponseBody
 import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -78,7 +79,14 @@ class EwsClient(
      * Закрывает открытые соединения. NTLM аутентифицирует TCP-соединение целиком, поэтому после выхода
      * или перед входом под другой учётной записью старые соединения использовать нельзя.
      */
-    fun evictConnections() = http.connectionPool.evictAll()
+    /**
+     * Отменяет идущие запросы и закрывает соединения: соединение, уже прошедшее NTLM под прежней учётной записью,
+     * не должно вернуться в пул и обслужить запросы новой.
+     */
+    fun evictConnections() {
+        http.dispatcher.cancelAll()
+        http.connectionPool.evictAll()
+    }
 
     /** Сервер отверг часовой пояс телефона — дальше работаем без TimeZoneContext (в UTC). */
     @Volatile
@@ -106,18 +114,20 @@ class EwsClient(
     private suspend fun send(body: String, timeZone: String?): XmlNode {
         val cfg = session.config ?: throw EwsAuthException()
         val envelope = envelope(body, timeZone)
+        val oneShot = sendsMail(body)
         val request = Request.Builder()
             .url(cfg.url)
             .header("Content-Type", "text/xml; charset=utf-8")
             .header("Accept", "text/xml")
             .applyAffinity()
-            .post(envelope.toRequestBody(XML))
+            .post(if (oneShot) OneShotBody(envelope) else envelope.toRequestBody(XML))
             .build()
         return mutex.withLock {
             // NTLM проверяет подлинность TCP-соединения, а рукопожатие повторяет запрос целиком (до трёх раз).
             // Перед крупным запросом (вложения) на возможно закрытом сервером соединении сначала проходим
             // рукопожатие коротким запросом — тогда вложение уходит один раз.
-            if (envelope.length > LARGE_BODY && (lastCallAt == 0L || System.nanoTime() - lastCallAt > IDLE_NANOS)) warmUp(cfg.url)
+            // Отправку письма OkHttp не повторяет после обрыва — на простаивавшем соединении тоже сначала «прогрев»
+            if ((envelope.length > LARGE_BODY || oneShot) && (lastCallAt == 0L || System.nanoTime() - lastCallAt > IDLE_NANOS)) warmUp(cfg.url)
             val result = http.newCall(request).await().use { response -> withContext(Dispatchers.IO) { handle(response) } }
             lastCallAt = System.nanoTime()
             result
@@ -276,7 +286,8 @@ class EwsClient(
             """<Request><EMailAddress>${esc(email.trim())}</EMailAddress>""" +
             """<AcceptableResponseSchema>http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a</AcceptableResponseSchema>""" +
             """</Request></Autodiscover>"""
-        val targets = urls ?: listOf(domain, "autodiscover.$domain").map { "https://$it/autodiscover/autodiscover.xml" }
+        // Сначала узел autodiscover. (обычно сам Exchange), затем сайт домена — часто на стороннем хостинге
+        val targets = urls ?: listOf("autodiscover.$domain", domain).map { "https://$it/autodiscover/autodiscover.xml" }
         for (url in targets) {
             val result = try {
                 mutex.withLock {
@@ -1044,14 +1055,36 @@ class EwsClient(
             return url?.let { AutodiscoverResult.Found(it) }
         }
 
-        /** Клиент для проверки адреса сервера: без учётных данных и с короткими таймаутами. */
+        /**
+         * Клиент для проверки адреса сервера: без учётных данных. Подключение к одному IP — коротко (у сервера может
+         * быть и недоступный адрес, например IPv6), на всю проверку — с запасом.
+         */
         private val probeHttp: OkHttpClient by lazy {
             OkHttpClient.Builder()
-                .connectTimeout(6, TimeUnit.SECONDS)
-                .readTimeout(6, TimeUnit.SECONDS)
-                .callTimeout(10, TimeUnit.SECONDS)
+                .connectTimeout(4, TimeUnit.SECONDS)
+                .readTimeout(8, TimeUnit.SECONDS)
+                .callTimeout(20, TimeUnit.SECONDS)
                 .followRedirects(false)
                 .build()
+        }
+
+        /**
+         * Запрос отправляет письмо или приглашение. Такой запрос OkHttp не повторяет сам после обрыва связи:
+         * сервер мог уже получить его, и письмо ушло бы дважды. Рукопожатие NTLM (ответ 401) он по-прежнему проходит.
+         */
+        private fun sendsMail(body: String) =
+            body.contains("SendAndSaveCopy") || body.contains("MessageDisposition=\"SendOnly\"") ||
+                body.startsWith("<m:SendItem") || body.contains("SendToAll") || body.contains("SendOnlyToAll") ||
+                body.contains("<m:CreateItem MessageDisposition=\"SendAndSaveCopy\"")
+
+        private class OneShotBody(private val text: String) : okhttp3.RequestBody() {
+            private val bytes = text.toByteArray(Charsets.UTF_8)
+            override fun contentType() = XML
+            override fun contentLength() = bytes.size.toLong()
+            override fun isOneShot() = true
+            override fun writeTo(sink: okio.BufferedSink) {
+                sink.write(bytes)
+            }
         }
 
         /**
@@ -1061,8 +1094,9 @@ class EwsClient(
         suspend fun isEwsEndpoint(url: String): Boolean = withContext(Dispatchers.IO) {
             try {
                 probeHttp.newCall(Request.Builder().url(url).get().build()).execute().use { r ->
-                    r.code == 401 && r.headers("WWW-Authenticate").any { h ->
-                        listOf("NTLM", "Negotiate", "Basic").any { h.trim().startsWith(it, ignoreCase = true) }
+                    // Только NTLM/Negotiate: адрес, который просит лишь Basic (обычный сайт с паролем), сервером почты не считаем
+                    r.code == 401 && r.headers("WWW-Authenticate").flatMap { it.split(',') }.any { h ->
+                        listOf("NTLM", "Negotiate").any { h.trim().startsWith(it, ignoreCase = true) }
                     }
                 }
             } catch (e: CancellationException) {
@@ -1080,7 +1114,20 @@ class EwsClient(
             builder
                 .protocols(listOf(Protocol.HTTP_1_1))
                 .connectionPool(ConnectionPool(2, 5, TimeUnit.MINUTES))
+                // Ответ 401 дочитывается целиком: иначе OkHttp может не вернуть соединение для следующего шага
+                // NTLM, а рукопожатие на новом соединении сервер считает неверным паролем
+                .addNetworkInterceptor { chain ->
+                    val response = chain.proceed(chain.request())
+                    if (response.code != 401) return@addNetworkInterceptor response
+                    val body = response.body ?: return@addNetworkInterceptor response
+                    val type = body.contentType()
+                    val bytes = body.use { it.bytes() }
+                    response.newBuilder().body(bytes.toResponseBody(type)).build()
+                }
                 .authenticator(NtlmAuthenticator({ session.config?.credentials }, basic = { session.config?.basic == true }))
+                // Переадресации не выполняются: ответ NTLM и пароль Basic не должны уйти на другой адрес
+                .followRedirects(false)
+                .followSslRedirects(false)
                 .connectTimeout(20, TimeUnit.SECONDS)
                 .readTimeout(readTimeoutSeconds, TimeUnit.SECONDS)
                 .writeTimeout(120, TimeUnit.SECONDS)

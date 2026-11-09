@@ -49,6 +49,7 @@ import java.io.File
 import java.time.Instant
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -164,8 +165,14 @@ class MailRepository @Inject constructor(
         )
     }
 
+    /** Обновление и подгрузка одной папки — по очереди: иначе ответ более раннего запроса удаляет только что пришедшее. */
+    private val folderLocks = ConcurrentHashMap<String, kotlinx.coroutines.sync.Mutex>()
+    private fun lockOf(folderId: String) = folderLocks.getOrPut(folderId) { kotlinx.coroutines.sync.Mutex() }
+
     /** Обновляет первую страницу папки. Возвращает число новых писем. */
-    suspend fun refresh(folderId: String, pageSize: Int = PAGE): Int {
+    suspend fun refresh(folderId: String, pageSize: Int = PAGE): Int = lockOf(folderId).withLock { refreshLocked(folderId, pageSize) }
+
+    private suspend fun refreshLocked(folderId: String, pageSize: Int): Int {
         val started = SystemClock.elapsedRealtimeNanos()
         val newestBefore = messageDao.newest(folderId) ?: 0L
         val page = client.findMessages(folderId, 0, pageSize)
@@ -175,7 +182,11 @@ class MailRepository @Inject constructor(
             if (entities.isEmpty()) messageDao.clearFolder(folderId)
             else messageDao.deleteMissing(folderId, 0, entities.map { it.id })
         } else if (entities.isNotEmpty()) {
-            messageDao.deleteMissing(folderId, entities.minOf { it.receivedAt }, entities.map { it.id })
+            val pageOldest = entities.minOf { it.receivedAt }
+            messageDao.deleteMissing(folderId, pageOldest, entities.map { it.id })
+            // Новых писем больше страницы: между ней и сохранёнными была бы «дыра», которую «загрузить ещё» не заполнит
+            // (оно грузит старше самого старого). Сохранённые старше страницы убираем — они догрузятся при прокрутке
+            if (newestBefore > 0 && pageOldest > newestBefore) messageDao.deleteOlderThan(folderId, pageOldest)
         }
         return entities.count { it.receivedAt > newestBefore && newestBefore > 0 }
     }
@@ -187,10 +198,15 @@ class MailRepository @Inject constructor(
      */
     suspend fun loadMore(folderId: String): Boolean {
         val started = SystemClock.elapsedRealtimeNanos()
-        val oldest = messageDao.oldest(folderId) ?: return refresh(folderId).let { true }
-        val page = client.findMessages(folderId, 0, PAGE, before = Instant.ofEpochMilli(oldest))
-        messageDao.upsert(mergeLocal(folderId, started, page.items.map { it.toEntity(folderId) }))
-        return !page.isLast
+        val oldest = lockOf(folderId).withLock { messageDao.oldest(folderId) } ?: return refresh(folderId).let { true }
+        return lockOf(folderId).withLock {
+            val page = client.findMessages(folderId, 0, PAGE, before = Instant.ofEpochMilli(oldest))
+            val items = page.items.map { it.toEntity(folderId) }
+            messageDao.upsert(mergeLocal(folderId, started, items))
+            // Вся страница — письма с той же секундой, что и самое старое (массовая рассылка, импорт): следующая
+            // была бы такой же — дальше не грузим, иначе «загрузка» повторялась бы бесконечно
+            !page.isLast && items.any { it.receivedAt < oldest }
+        }
     }
 
     /**
@@ -262,7 +278,9 @@ class MailRepository @Inject constructor(
         val inline = detail.attachments.filter { it.contentId != null && !it.isItem && it.size < INLINE_MAX_BYTES }
             .filter { html.contains("cid:${it.contentId}", ignoreCase = true) }
         if (inline.isEmpty()) return html
-        inline.forEach { html = html.replace("cid:${it.contentId}", InlineImages.url(it.id), ignoreCase = true) }
+        // Длинные идентификаторы первыми: иначе замена «cid:image1» испортила бы «cid:image10»
+        inline.sortedByDescending { it.contentId?.length ?: 0 }
+            .forEach { html = html.replace("cid:${it.contentId}", InlineImages.url(it.id), ignoreCase = true) }
         withContext(Dispatchers.IO) { prefetchInline(detail.ref.id, inline) }
         return html
     }
@@ -572,7 +590,8 @@ class MailRepository @Inject constructor(
                 if (last || items.isEmpty() || items.all { it.receivedAt < fromMs }) break
                 offset += items.size
             }
-            return found.take(SEARCH_MAX)
+            // Между страницами письмо могло прийти или удалиться — одно и то же попало бы в список дважды
+            return found.distinctBy { it.id }.take(SEARCH_MAX)
         }
         private const val INLINE_MAX_BYTES = 5_000_000L
         private const val INLINE_CHUNK_BYTES = 2_000_000L

@@ -40,6 +40,9 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.onLongClick
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Size
@@ -244,6 +247,11 @@ fun HoldableBox(
     Box(
         modifier
             .indication(interaction, ripple())
+            // Для TalkBack: касание — открыть, двойное касание с удержанием — меню действий
+            .semantics(mergeDescendants = true) {
+                onClick(label = "Открыть") { tap(); true }
+                onLongClick(label = "Действия") { hold(); true }
+            }
             .pointerInput(holdMillis) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)

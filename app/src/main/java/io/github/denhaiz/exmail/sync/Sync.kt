@@ -107,7 +107,10 @@ class SyncWorker @AssistedInject constructor(
     }
 }
 
-/** Проверка новой версии приложения: при запуске и раз в 12 часов в фоне; уведомление — один раз на версию. */
+/**
+ * Проверка новой версии приложения: при запуске процесса и раз в 12 часов в фоне. Уведомление — не чаще раза в 3 дня
+ * и не во время отсрочки «Позже»; пока приложение на экране, вместо уведомления показывается окно (AppNav).
+ */
 @Singleton
 class UpdateChecker @Inject constructor(
     @ApplicationContext private val context: Context,
@@ -120,20 +123,32 @@ class UpdateChecker @Inject constructor(
         val request = PeriodicWorkRequestBuilder<UpdateWorker>(12, TimeUnit.HOURS)
             .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
             .build()
-        WorkManager.getInstance(context).enqueueUniquePeriodicWork(UPDATE_WORK, ExistingPeriodicWorkPolicy.KEEP, request)
+        WorkManager.getInstance(context).enqueueUniquePeriodicWork(UPDATE_WORK, ExistingPeriodicWorkPolicy.UPDATE, request)
     }
 
-    suspend fun check() = lock.withLock {
+    /** [notify] = false — только обновить состояние (при запуске приложения окно покажет AppNav). */
+    suspend fun check(notify: Boolean) = lock.withLock {
         val release = updater.latest()
         updater.offer(release)
+        if (!notify || AppVisibility.isVisible()) return@withLock
+        // Уже загружается или загружено — «доступна новая версия» не к месту
+        val st = updater.state.value
+        if (st is io.github.denhaiz.exmail.update.UpdateState.Downloading || st is io.github.denhaiz.exmail.update.UpdateState.Ready) return@withLock
         if (release == null || !io.github.denhaiz.exmail.update.AppUpdater.isNewer(release.version, io.github.denhaiz.exmail.BuildConfig.VERSION_NAME)) return@withLock
-        if (!store.currentSettings().updateNotify || store.updateNotified() == release.version) return@withLock
+        val now = System.currentTimeMillis()
+        val s = store.currentSettings()
+        if (!s.updateNotify || s.updatePostponed(release.version, now)) return@withLock
+        val (version, at) = store.updateNotified()
+        if (version == release.version && now - at < REMIND_MILLIS) return@withLock
         Notifications.showUpdate(context, release)
-        store.setUpdateNotified(release.version)
+        store.setUpdateNotified(release.version, now)
     }
 
-    private companion object {
-        const val UPDATE_WORK = "app-update"
+    companion object {
+        private const val UPDATE_WORK = "app-update"
+
+        /** Повторное напоминание и отсрочка «Позже» — 3 дня. */
+        const val REMIND_MILLIS = 3 * 24 * 60 * 60 * 1000L
     }
 }
 
@@ -144,10 +159,12 @@ class UpdateWorker @AssistedInject constructor(
     private val checker: UpdateChecker,
 ) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result = try {
-        checker.check()
+        checker.check(notify = true)
         Result.success()
     } catch (e: kotlinx.coroutines.CancellationException) {
         throw e
+    } catch (_: io.github.denhaiz.exmail.update.UpdateException) {
+        Result.success() // ответ сервера (в т.ч. лимит запросов GitHub): повтор через 30 с не поможет — ждём следующей проверки
     } catch (_: Exception) {
         Result.retry()
     }
@@ -187,7 +204,7 @@ object Notifications {
     }
 
     /** «Доступна новая версия»: нажатие открывает настройки с предложением обновиться. */
-    fun showUpdate(context: Context, release: io.github.denhaiz.exmail.update.AppRelease) {
+    fun showUpdate(context: Context, release: io.github.denhaiz.exmail.update.AppRelease, ready: Boolean = false) {
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) return
@@ -201,9 +218,12 @@ object Notifications {
         val notes = io.github.denhaiz.exmail.update.AppUpdater.plainNotes(release.notes)
         val n = NotificationCompat.Builder(context, CHANNEL_UPDATE)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle("Доступна новая версия ExMail ${release.version}")
-            .setContentText("Нажмите, чтобы обновить")
-            .setStyle(NotificationCompat.BigTextStyle().bigText(("Нажмите, чтобы обновить.\n\n" + notes).take(600)))
+            .setContentTitle(if (ready) "ExMail ${release.version} загружена" else "Доступна новая версия ExMail ${release.version}")
+            .setContentText(if (ready) "Нажмите, чтобы установить" else "Нажмите, чтобы обновить")
+            .setStyle(
+                NotificationCompat.BigTextStyle()
+                    .bigText(((if (ready) "Нажмите, чтобы установить." else "Нажмите, чтобы обновить.") + "\n\n" + notes).take(600)),
+            )
             .setAutoCancel(true)
             .setContentIntent(pi)
             .build()

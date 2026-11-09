@@ -151,6 +151,9 @@ interface MessageDao {
     @Query("DELETE FROM messages WHERE folderId = :folderId AND receivedAt >= :from AND id NOT IN (:keep)")
     suspend fun deleteMissing(folderId: String, from: Long, keep: List<String>)
 
+    @Query("DELETE FROM messages WHERE folderId = :folderId AND receivedAt < :before")
+    suspend fun deleteOlderThan(folderId: String, before: Long)
+
     @Query("DELETE FROM messages WHERE folderId = :folderId")
     suspend fun clearFolder(folderId: String)
 

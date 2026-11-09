@@ -93,6 +93,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.material.icons.outlined.MeetingRoom
 import androidx.compose.material.icons.outlined.Repeat
 import androidx.compose.material3.InputChip
+import io.github.denhaiz.exmail.ui.common.ConfirmDialog
 import io.github.denhaiz.exmail.ui.common.Format
 import io.github.denhaiz.exmail.ui.common.Recipient
 import io.github.denhaiz.exmail.ui.common.RecipientField
@@ -149,6 +150,9 @@ class EventEditViewModel @Inject constructor(
         private set
     var roomsBusy by mutableStateOf<Set<String>>(emptySet())
         private set
+    /** Переговорные, для которых сервер вернул занятость (остальные — «нет данных»). */
+    var roomsKnown by mutableStateOf<Set<String>>(emptySet())
+        private set
     var roomsLoading by mutableStateOf(false)
         private set
     var roomsError by mutableStateOf<String?>(null)
@@ -167,6 +171,15 @@ class EventEditViewModel @Inject constructor(
     private val _events = Channel<String?>(Channel.BUFFERED)
     val events = _events.receiveAsFlow()
 
+    private fun snapshot(): List<Any?> = listOf(
+        subject, location, description, allDay, date, startTime, duration,
+        attendees.map { it.email.lowercase() }, reminder, recurrence, room?.email,
+    )
+    private var initial: List<Any?>? = null
+
+    /** Форма изменена после открытия (закрытие без сохранения — с вопросом). */
+    val hasChanges: Boolean get() = initial.let { it != null && it != snapshot() } || typedAttendees.isNotBlank()
+
     init {
         saved.get<String>("date")?.takeIf { it.isNotBlank() }?.let { date = LocalDate.parse(it) }
         if (isNew) {
@@ -174,6 +187,7 @@ class EventEditViewModel @Inject constructor(
             val now = LocalDateTime.now()
             startTime = if (date == now.toLocalDate()) LocalTime.of((now.hour + 1).coerceAtMost(23), 0) else LocalTime.of(10, 0)
             saved.get<String>("to")?.takeIf { it.isNotBlank() }?.let { attendees = listOf(Recipient("", it)) }
+            initial = snapshot()
             refreshAvailability()
         } else {
             viewModelScope.launch {
@@ -195,6 +209,7 @@ class EventEditViewModel @Inject constructor(
                         .map { Recipient(it.mailbox.name, it.mailbox.email) }
                     reminder = if (e.reminderSet) e.reminderMinutes else null
                     room = e.resources.firstOrNull()?.let { Room(it.mailbox.display, it.mailbox.email) }
+                    initial = snapshot()
                     refreshAvailability()
                 } catch (ex: Exception) {
                     _events.send(ex.userMessage())
@@ -223,8 +238,12 @@ class EventEditViewModel @Inject constructor(
     }
 
     fun setEnd(t: LocalTime) {
-        var d = Duration.between(startTime, t)
-        if (d.isNegative || d.isZero) d = d.plusDays(1)
+        val d = Duration.between(startTime, t)
+        // Раньше конец «раньше начала» молча превращался во встречу до следующего дня
+        if (d.isNegative || d.isZero) {
+            viewModelScope.launch { _events.send("Окончание должно быть позже начала") }
+            return
+        }
         duration = d
     }
 
@@ -255,7 +274,9 @@ class EventEditViewModel @Inject constructor(
                     val slots = calendar.availability(list.take(100).map { it.email }, dayStart, dayStart.plus(Duration.ofDays(1)))
                     val from = if (allDay) 0 else startTime.toSecondOfDay() / 1800
                     val to = if (allDay) 48 else from + maxOf(1, (duration.toMinutes() / 30).toInt())
-                    roomsBusy = slots.filter { a ->
+                    val known = slots.filter { it.error == null && it.mergedFreeBusy.isNotEmpty() }
+                    roomsKnown = known.map { it.email.lowercase() }.toSet()
+                    roomsBusy = known.filter { a ->
                         (from until to).any { i -> a.mergedFreeBusy.getOrNull(i) in setOf('1', '2', '3') }
                     }.map { it.email.lowercase() }.toSet()
                 }
@@ -375,12 +396,29 @@ fun EventEditScreen(onClose: () -> Unit, onSaved: (String) -> Unit, vm: EventEdi
             if (msg == null) onSaved(vm.doneMessage) else scope.launch { snackbar.showSnackbar(msg) }
         }
     }
-    BackHandler(onBack = onClose)
+    var confirmClose by remember { mutableStateOf(false) }
+    fun close() = when {
+        vm.saving -> Unit // сохранение отменилось бы на полпути: неизвестно, создана ли встреча
+        vm.hasChanges -> confirmClose = true
+        else -> onClose()
+    }
+    BackHandler(onBack = ::close)
+    if (confirmClose) {
+        ConfirmDialog(
+            title = "Закрыть без сохранения?",
+            text = "Изменения во встрече будут потеряны.",
+            confirm = "Не сохранять",
+            onConfirm = { confirmClose = false; onClose() },
+            onDismiss = { confirmClose = false },
+            dismiss = "Продолжить",
+            destructive = true,
+        )
+    }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                navigationIcon = { IconButton(onClick = onClose) { Icon(Icons.Outlined.Close, "Закрыть") } },
+                navigationIcon = { IconButton(onClick = ::close) { Icon(Icons.Outlined.Close, "Закрыть") } },
                 title = { Text(if (vm.isNew) "Новая встреча" else "Изменение", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 actions = {
                     Button(onClick = vm::save, enabled = !vm.saving && !vm.loading, modifier = Modifier.padding(end = 8.dp)) {
@@ -501,6 +539,7 @@ fun EventEditScreen(onClose: () -> Unit, onSaved: (String) -> Unit, vm: EventEdi
         RoomDialog(
             rooms = vm.rooms,
             busy = vm.roomsBusy,
+            known = vm.roomsKnown,
             loading = vm.roomsLoading,
             error = vm.roomsError,
             selected = vm.room,
@@ -514,6 +553,7 @@ fun EventEditScreen(onClose: () -> Unit, onSaved: (String) -> Unit, vm: EventEdi
 private fun RoomDialog(
     rooms: List<Room>?,
     busy: Set<String>,
+    known: Set<String>,
     loading: Boolean,
     error: String?,
     selected: Room?,
@@ -551,10 +591,19 @@ private fun RoomDialog(
                                 )
                                 Spacer(Modifier.width(12.dp))
                                 Text(r.name, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                val isKnown = r.email.lowercase() in known
                                 Text(
-                                    if (isBusy) "занята" else "свободна",
+                                    when {
+                                        isBusy -> "занята"
+                                        !isKnown -> "нет данных"
+                                        else -> "свободна"
+                                    },
                                     style = MaterialTheme.typography.labelMedium,
-                                    color = if (isBusy) MaterialTheme.colorScheme.error else Color(0xFF2E7D32),
+                                    color = when {
+                                        isBusy -> MaterialTheme.colorScheme.error
+                                        !isKnown -> MaterialTheme.colorScheme.onSurfaceVariant
+                                        else -> io.github.denhaiz.exmail.ui.theme.successColor()
+                                    },
                                     maxLines = 1,
                                 )
                             }

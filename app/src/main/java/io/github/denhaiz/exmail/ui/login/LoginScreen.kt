@@ -82,6 +82,19 @@ class LoginViewModel @Inject constructor(private val accounts: AccountRepository
     var error by mutableStateOf<String?>(null)
         private set
 
+    /** Техническая причина ошибки (мелким шрифтом): по ней ИТ-отдел поймёт, что случилось. */
+    var errorDetail by mutableStateOf<String?>(null)
+        private set
+
+    private fun fail(e: Exception) {
+        error = e.userMessage()
+        errorDetail = when (e) {
+            is io.github.denhaiz.exmail.ews.EwsAuthException, is IllegalArgumentException -> null
+            is io.github.denhaiz.exmail.ews.EwsException -> "${e.code}: ${e.message.orEmpty()}".take(300)
+            else -> (e.javaClass.simpleName + (e.message?.let { ": $it" } ?: "")).take(300)
+        }
+    }
+
     var discovering by mutableStateOf(false)
         private set
     var hint by mutableStateOf<String?>(null)
@@ -94,12 +107,13 @@ class LoginViewModel @Inject constructor(private val accounts: AccountRepository
         }
         loading = true
         error = null
+        errorDetail = null
         viewModelScope.launch {
             try {
                 accounts.login(login, password, server, options)
             } catch (e: Exception) {
                 if (e is CancellationException) throw e // закрыли экран или начали новый запрос — это не ошибка
-                error = e.userMessage()
+                fail(e)
             } finally {
                 loading = false
             }
@@ -114,6 +128,7 @@ class LoginViewModel @Inject constructor(private val accounts: AccountRepository
         }
         discovering = true
         error = null
+        errorDetail = null
         hint = null
         viewModelScope.launch {
             try {
@@ -126,7 +141,7 @@ class LoginViewModel @Inject constructor(private val accounts: AccountRepository
                 }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e // закрыли экран или начали новый запрос — это не ошибка
-                error = e.userMessage()
+                fail(e)
             } finally {
                 discovering = false
             }
@@ -229,7 +244,17 @@ fun LoginScreen(vm: LoginViewModel = hiltViewModel()) {
                         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Outlined.ErrorOutline, null, tint = MaterialTheme.colorScheme.error)
                             Spacer(Modifier.size(10.dp))
-                            Text(vm.error.orEmpty(), style = MaterialTheme.typography.bodyMedium)
+                            Column {
+                                Text(vm.error.orEmpty(), style = MaterialTheme.typography.bodyMedium)
+                                vm.errorDetail?.let {
+                                    Text(
+                                        it,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.7f),
+                                        modifier = Modifier.padding(top = 4.dp),
+                                    )
+                                }
+                            }
                         }
                     }
                 }

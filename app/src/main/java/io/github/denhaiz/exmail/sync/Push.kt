@@ -83,8 +83,16 @@ class MailPush @Inject constructor(
                 // Догоняем то, что пришло, пока подписки не было (запуск, обрыв связи)
                 checkNow()
                 val id = subscription ?: client.subscribeInbox().also { subscription = it }
+                val listenStarted = android.os.SystemClock.elapsedRealtime()
                 client.listen(id) { checkNow() }
-                pause = MIN_PAUSE // сервер штатно закрыл соединение через ~30 минут — сразу переподключаемся
+                if (android.os.SystemClock.elapsedRealtime() - listenStarted >= EARLY_CLOSE_MILLIS) {
+                    pause = MIN_PAUSE // сервер штатно закрыл соединение через ~30 минут — сразу переподключаемся
+                } else {
+                    // Соединение закрылось слишком рано (прокси обрывает долгие запросы): без паузы это был бы
+                    // бесконечный цикл обновлений и переподключений, разряжающий батарею
+                    sleep(pause)
+                    pause = (pause * 2).coerceAtMost(MAX_PAUSE)
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (_: EwsAuthException) {
@@ -117,6 +125,9 @@ class MailPush @Inject constructor(
     private companion object {
         const val MIN_PAUSE = 5_000L
         const val MAX_PAUSE = 5 * 60_000L
+
+        /** Подписка держит соединение до ~29 минут; закрылось раньше 5 минут — считаем обрывом. */
+        const val EARLY_CLOSE_MILLIS = 5 * 60_000L
         const val AUTH_PAUSE = 30 * 60_000L
     }
 }
@@ -134,7 +145,10 @@ class PushService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        goForeground()
+        if (!goForeground()) {
+            stopSelf()
+            return
+        }
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(n: Network) = push.kick()
         }
@@ -143,7 +157,10 @@ class PushService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        goForeground()
+        if (!goForeground()) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
         if (job?.isActive != true) {
             job = scope.launch {
                 push.run()
@@ -159,9 +176,13 @@ class PushService : Service() {
         super.onDestroy()
     }
 
-    private fun goForeground() {
+    /** false — Android не разрешил службу переднего плана (перезапуск из фона на Android 12+): работает резервная проверка. */
+    private fun goForeground(): Boolean = try {
         val type = if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
         ServiceCompat.startForeground(this, Notifications.ID_SERVICE, Notifications.serviceNotification(this), type)
+        true
+    } catch (_: Exception) {
+        false
     }
 }
 

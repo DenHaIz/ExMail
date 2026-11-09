@@ -24,6 +24,8 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import io.github.denhaiz.exmail.data.AccountInfo
 import io.github.denhaiz.exmail.data.AccountStore
 import io.github.denhaiz.exmail.data.AppSettings
@@ -235,11 +237,23 @@ class MailListViewModel @Inject constructor(
         }
     }
 
-    fun toggleRead(m: MessageEntity) = launchAction { repo.markRead(listOf(m.id), !m.isRead) }
+    fun toggleRead(m: MessageEntity) {
+        patchSearch(m.id) { it.copy(isRead = !m.isRead) }
+        launchAction { repo.markRead(listOf(m.id), !m.isRead) }
+    }
 
-    fun toggleFlag(m: MessageEntity) = launchAction { repo.setFlag(listOf(m.id), !m.flagged) }
+    fun toggleFlag(m: MessageEntity) {
+        patchSearch(m.id) { it.copy(flagged = !m.flagged) }
+        launchAction { repo.setFlag(listOf(m.id), !m.flagged) }
+    }
+
+    /** Найденные письма — снимок с сервера: изменения из списка применяем и к нему, иначе строка «не меняется». */
+    private fun patchSearch(id: String, change: (MessageEntity) -> MessageEntity?) {
+        searchResults = searchResults?.mapNotNull { if (it.id == id) change(it) else it }
+    }
 
     fun move(m: MessageEntity, to: FolderEntity) = launchAction {
+        patchSearch(m.id) { null }
         repo.move(listOf(m.id), to.id)
         _messagesToUser.send("Перемещено в «${to.name}»")
     }
@@ -252,6 +266,8 @@ class MailListViewModel @Inject constructor(
      */
     fun hide(m: MessageEntity) {
         pendingDeletes.value = pendingDeletes.value + m.id
+        hiddenFromSearch[m.id] = m
+        patchSearch(m.id) { null }
         deleteTimers.remove(m.id)?.cancel()
         deleteTimers[m.id] = viewModelScope.launch {
             delay(UNDO_MILLIS)
@@ -263,7 +279,11 @@ class MailListViewModel @Inject constructor(
     fun undoDelete(m: MessageEntity) {
         deleteTimers.remove(m.id)?.cancel()
         pendingDeletes.value = pendingDeletes.value - m.id
+        // Вернуть и в результаты поиска, если удаляли оттуда
+        hiddenFromSearch.remove(m.id)?.let { back -> if (searchResults != null) searchResults = (searchResults.orEmpty() + back).sortedByDescending { it.receivedAt } }
     }
+
+    private val hiddenFromSearch = HashMap<String, MessageEntity>()
 
     /** Удалить сразу (снэкбар закрыт без «Отменить»). */
     fun deleteNow(m: MessageEntity) {
@@ -279,9 +299,11 @@ class MailListViewModel @Inject constructor(
     }
 
     private fun commitDelete(m: MessageEntity) {
+        hiddenFromSearch.remove(m.id)
         viewModelScope.launch {
             try {
-                repo.delete(listOf(m.id))
+                // Начатое удаление доводится до конца, даже если экран закрыли (иначе письмо «вернётся»)
+                withContext(NonCancellable) { repo.delete(listOf(m.id)) }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e // закрыли экран или начали новый запрос — это не ошибка
                 _messagesToUser.send("Не удалось удалить: ${e.userMessage()}")
@@ -414,7 +436,11 @@ class MailListViewModel @Inject constructor(
     }
 
     companion object {
-        const val UNDO_MILLIS = 10_000L
+        /**
+         * Запасной срок удаления, если снэкбар «Отменить» не закрылся сам (уход с экрана). Обычно письмо удаляется,
+         * когда снэкбар исчезает; срок больше любого показа снэкбара — «Отменить» на экране всегда работает.
+         */
+        const val UNDO_MILLIS = 60_000L
         val TAB_LABELS = mapOf("mail" to "Почта", "calendar" to "Календарь", "contacts" to "Контакты")
 
         fun buildDrawer(folders: List<FolderEntity>, s: AppSettings): List<DrawerGroup> {

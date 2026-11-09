@@ -60,6 +60,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
@@ -116,7 +117,8 @@ fun Avatar(name: String, email: String, size: Dp = 40.dp, modifier: Modifier = M
                 initials,
                 color = Color.White,
                 fontWeight = FontWeight.SemiBold,
-                fontSize = (size.value * 0.4f).sp,
+                // В dp, а не sp: крупный системный шрифт не выталкивает инициалы за круг
+                fontSize = with(LocalDensity.current) { (size * 0.4f).toSp() },
             )
         }
     }
@@ -326,12 +328,19 @@ fun RecipientField(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 recipients.forEach { r ->
+                    // Получатель убирается только крестиком: касание самой «чипсы» (посмотреть адрес) его не удаляет
                     InputChip(
                         selected = false,
-                        onClick = { onChange(recipients - r) },
+                        onClick = {},
                         label = { Text(r.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                         avatar = { Avatar(r.name, r.email, size = InputChipDefaults.AvatarSize) },
-                        trailingIcon = { Icon(Icons.Default.Close, "Убрать ${r.label}", Modifier.size(16.dp)) },
+                        trailingIcon = {
+                            Icon(
+                                Icons.Default.Close,
+                                "Убрать ${r.label}",
+                                Modifier.size(24.dp).clip(CircleShape).clickable { onChange(recipients - r) }.padding(4.dp),
+                            )
+                        },
                         modifier = Modifier.align(Alignment.CenterVertically),
                     )
                 }

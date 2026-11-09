@@ -64,7 +64,14 @@ data class AppSettings(
     val swipeLeft: SwipeAction = SwipeAction.NONE,
     /** Уведомлять о новой версии приложения. */
     val updateNotify: Boolean = true,
+    /** «Позже» в окне обновления: до [updatePostponedUntil] о версии [updatePostponedVersion] не напоминаем. */
+    val updatePostponedVersion: String = "",
+    val updatePostponedUntil: Long = 0L,
 ) {
+    /** Напоминание о версии [version] отложено кнопкой «Позже». */
+    fun updatePostponed(version: String, now: Long = System.currentTimeMillis()): Boolean =
+        updatePostponedVersion == version && now < updatePostponedUntil
+
     companion object {
         const val THEME_SYSTEM = "system"
         const val THEME_LIGHT = "light"
@@ -121,6 +128,9 @@ class AccountStore @Inject constructor(@ApplicationContext private val context: 
         val swipeLeft = stringPreferencesKey("swipe_left")
         val updateNotify = booleanPreferencesKey("update_notify")
         val updateNotified = stringPreferencesKey("update_notified")
+        val updateNotifiedAt = longPreferencesKey("update_notified_at")
+        val updatePostponedVersion = stringPreferencesKey("update_postponed_version")
+        val updatePostponedUntil = longPreferencesKey("update_postponed_until")
     }
 
     suspend fun load(): Pair<AccountInfo, String>? {
@@ -154,6 +164,9 @@ class AccountStore @Inject constructor(@ApplicationContext private val context: 
             val left = p[Keys.swipeLeft]
             val updateNotify = p[Keys.updateNotify]
             val updateNotified = p[Keys.updateNotified]
+            val updateNotifiedAt = p[Keys.updateNotifiedAt]
+            val postponedVersion = p[Keys.updatePostponedVersion]
+            val postponedUntil = p[Keys.updatePostponedUntil]
             p.clear()
             theme?.let { p[Keys.theme] = it }
             zoom?.let { p[Keys.messageZoom] = it }
@@ -162,6 +175,9 @@ class AccountStore @Inject constructor(@ApplicationContext private val context: 
             left?.let { p[Keys.swipeLeft] = it }
             updateNotify?.let { p[Keys.updateNotify] = it }
             updateNotified?.let { p[Keys.updateNotified] = it }
+            updateNotifiedAt?.let { p[Keys.updateNotifiedAt] = it }
+            postponedVersion?.let { p[Keys.updatePostponedVersion] = it }
+            postponedUntil?.let { p[Keys.updatePostponedUntil] = it }
         }
         runCatching { keyStore().deleteEntry(KEY_ALIAS) }
     }
@@ -186,6 +202,8 @@ class AccountStore @Inject constructor(@ApplicationContext private val context: 
         swipeRight = SwipeAction.of(p[Keys.swipeRight], SwipeAction.READ),
         swipeLeft = SwipeAction.of(p[Keys.swipeLeft], SwipeAction.NONE),
         updateNotify = p[Keys.updateNotify] ?: true,
+        updatePostponedVersion = p[Keys.updatePostponedVersion].orEmpty(),
+        updatePostponedUntil = p[Keys.updatePostponedUntil] ?: 0L,
     )
 
     /** Сохранённый порядок + новые элементы по умолчанию, без неизвестных. */
@@ -208,9 +226,19 @@ class AccountStore @Inject constructor(@ApplicationContext private val context: 
     suspend fun setSwipeLeft(action: SwipeAction) = context.dataStore.edit { it[Keys.swipeLeft] = action.key }
     suspend fun setUpdateNotify(enabled: Boolean) = context.dataStore.edit { it[Keys.updateNotify] = enabled }
 
-    /** Версия, о которой уже сообщали уведомлением (о каждой — один раз). */
-    suspend fun updateNotified(): String? = context.dataStore.data.first()[Keys.updateNotified]
-    suspend fun setUpdateNotified(version: String) = context.dataStore.edit { it[Keys.updateNotified] = version }
+    /** Версия, о которой последний раз сообщали уведомлением, и когда. */
+    suspend fun updateNotified(): Pair<String?, Long> =
+        context.dataStore.data.first().let { it[Keys.updateNotified] to (it[Keys.updateNotifiedAt] ?: 0L) }
+    suspend fun setUpdateNotified(version: String, at: Long) = context.dataStore.edit {
+        it[Keys.updateNotified] = version
+        it[Keys.updateNotifiedAt] = at
+    }
+
+    /** «Позже»: не напоминать о версии [version] до [until]. */
+    suspend fun setUpdatePostponed(version: String, until: Long) = context.dataStore.edit {
+        it[Keys.updatePostponedVersion] = version
+        it[Keys.updatePostponedUntil] = until
+    }
 
     /** Есть ли сохранённая учётная запись (без расшифровки пароля). */
     suspend fun hasAccount(): Boolean = context.dataStore.data.first().let { it[Keys.login] != null && it[Keys.secret] != null }

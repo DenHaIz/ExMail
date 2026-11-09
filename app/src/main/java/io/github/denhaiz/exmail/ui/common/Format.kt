@@ -24,6 +24,12 @@ object Format {
 
     private val initialsJunk = Regex("[<>\"()]")
 
+    /** Дата без времени: «3 окт», «3 окт 2027» (не текущий год). */
+    fun shortDate(instant: Instant): String {
+        val d = instant.atZone(zone()).toLocalDate()
+        return d.format(if (d.year == LocalDate.now().year) dayMonth else dayMonthYear)
+    }
+
     /** Короткое время для списка писем: «14:05», «вчера», «пн», «3 окт», «3 окт 2024». */
     fun listTime(millis: Long, now: ZonedDateTime = ZonedDateTime.now()): String {
         if (millis <= 0) return ""

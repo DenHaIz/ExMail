@@ -6,6 +6,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 
 val Brand = Color(0xFF0F6CBD)
 
@@ -60,3 +61,13 @@ private val avatarPalette = listOf(
 
 /** Цвет аватара по имени — стабильный и различимый. */
 fun avatarColor(key: String): Color = avatarPalette[(key.lowercase().hashCode() and 0x7fffffff) % avatarPalette.size]
+
+private val isDark: Boolean @Composable get() = MaterialTheme.colorScheme.surface.luminance() < 0.5f
+
+/** Зелёный для «свободно / принято»: в тёмной теме светлее, чтобы читался на тёмном фоне. */
+@Composable
+fun successColor(): Color = if (isDark) Color(0xFF81C784) else Color(0xFF2E7D32)
+
+/** Оранжевый для «под вопросом». */
+@Composable
+fun warningColor(): Color = if (isDark) Color(0xFFFFB74D) else Color(0xFFE65100)

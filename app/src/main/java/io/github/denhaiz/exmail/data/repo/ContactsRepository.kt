@@ -58,7 +58,7 @@ class ContactsRepository @Inject constructor(
         val q = query.trim()
         if (q.isEmpty()) {
             return dao.search("%").map { ContactInfo(it.id, it.displayName, it.email, jobTitle = it.jobTitle, company = it.company) }
-                .filter { it.email.isNotBlank() }
+                .filter { it.email.isNotBlank() }.distinctBy { it.email.lowercase() } // один адрес дважды — ключ списка
         }
         val local = dao.search("%$q%").map { ContactInfo(it.id, it.displayName, it.email, jobTitle = it.jobTitle, company = it.company) }
         val remote = if (q.length >= 2) client.resolveNames(q, includePersonal = false) else emptyList()

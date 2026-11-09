@@ -54,6 +54,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.navigation.NavGraph.Companion.findStartDestination
+import androidx.lifecycle.Lifecycle
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -65,7 +66,14 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.launch
 import io.github.denhaiz.exmail.data.AccountStore
 import io.github.denhaiz.exmail.data.AppSettings
+import io.github.denhaiz.exmail.sync.Notifications
 import io.github.denhaiz.exmail.sync.PushController
+import io.github.denhaiz.exmail.sync.UpdateChecker
+import io.github.denhaiz.exmail.ui.settings.UpdateDialog
+import io.github.denhaiz.exmail.ui.settings.UpdateInstallHost
+import io.github.denhaiz.exmail.update.AppUpdater
+import io.github.denhaiz.exmail.update.UpdateState
+import androidx.compose.runtime.saveable.rememberSaveable
 import io.github.denhaiz.exmail.ui.calendar.CalendarScreen
 import io.github.denhaiz.exmail.ui.calendar.EventEditScreen
 import io.github.denhaiz.exmail.ui.calendar.EventScreen
@@ -96,14 +104,24 @@ object Routes {
     fun compose(mode: String = "new", ref: String = "", to: String = "") = "compose?mode=$mode&ref=${enc(ref)}&to=${enc(to)}"
     fun event(id: String) = "event/${enc(id)}"
     fun eventEdit(id: String = "", date: LocalDate? = null, to: String = "") = "eventEdit?id=${enc(id)}&date=${date ?: ""}&to=${enc(to)}"
-    fun contact(email: String, id: String? = null) = "contact/${enc(email)}?id=${enc(id.orEmpty())}"
+    /** Контакт без e-mail (только телефон) открывается по id. */
+    fun contact(email: String, id: String? = null) = "contact?email=${enc(email)}&id=${enc(id.orEmpty())}"
 }
 
 @HiltViewModel
-class AppNavViewModel @Inject constructor(private val store: AccountStore, val push: PushController) : ViewModel() {
+class AppNavViewModel @Inject constructor(
+    private val store: AccountStore,
+    val push: PushController,
+    val updater: AppUpdater,
+) : ViewModel() {
     val settings = store.settings
 
     fun batteryAsked() = viewModelScope.launch { store.setBatteryAsked() }
+
+    /** «Позже» в окне обновления: следующее напоминание — через 3 дня. */
+    fun postponeUpdate(version: String) = viewModelScope.launch {
+        store.setUpdatePostponed(version, System.currentTimeMillis() + UpdateChecker.REMIND_MILLIS)
+    }
 }
 
 @Composable
@@ -143,6 +161,38 @@ fun AppNav(
             nav.navigate(Routes.message(openMessageId))
             onMessageOpened()
         }
+    }
+    // Новая версия — окно при открытии приложения (раз за запуск), если её не отложили кнопкой «Позже»
+    val update by navVm.updater.state.collectAsState()
+    var updatePromptShown by rememberSaveable { mutableStateOf(false) }
+    var updatePrompt by rememberSaveable { mutableStateOf(false) }
+    // Единственное место установки обновления (из настроек и из этого окна)
+    UpdateInstallHost(navVm.updater) { msg -> scope.launch { snackbar.showSnackbar(msg) } }
+    LaunchedEffect(Unit) { navVm.updater.refreshIfStale() }
+    // Настройки ещё не прочитаны — не знаем, отложено ли обновление: ждём их
+    val storedSettings by navVm.settings.collectAsState(initial = null)
+    LaunchedEffect(update, storedSettings) {
+        val u = update
+        val s = storedSettings ?: return@LaunchedEffect
+        val release = (u as? UpdateState.Available)?.release ?: (u as? UpdateState.Ready)?.release ?: return@LaunchedEffect
+        // Открыто уведомлением — окно покажут настройки; уже обновляется по просьбе пользователя — окно не нужно
+        if (openUpdate || route == "settings?update={update}" || navVm.updater.installRequested.value) return@LaunchedEffect
+        if (!updatePromptShown && !s.updatePostponed(release.version)) {
+            updatePromptShown = true
+            updatePrompt = true
+        }
+    }
+    if (updatePrompt) {
+        UpdateDialog(
+            update,
+            navVm.updater,
+            onLater = { release ->
+                updatePrompt = false
+                navVm.postponeUpdate(release.version)
+                Notifications.cancelUpdate(context)
+            },
+            onDismiss = { updatePrompt = false },
+        )
     }
     LaunchedEffect(openUpdate) {
         if (openUpdate) {
@@ -198,11 +248,11 @@ fun AppNav(
                     composable("mail") {
                         Box(tabPage) {
                             MailListScreen(
-                                onOpenMessage = { id, browse -> nav.navigate(Routes.message(id, browse)) },
-                                onOpenDraft = { nav.navigate(Routes.compose("draft", it)) },
-                                onCompose = { nav.navigate(Routes.compose()) },
-                                onReply = { id, mode -> nav.navigate(Routes.compose(mode, id)) },
-                                onSettings = { nav.navigate("settings") },
+                                onOpenMessage = { id, browse -> nav.go(Routes.message(id, browse)) },
+                                onOpenDraft = { nav.go(Routes.compose("draft", it)) },
+                                onCompose = { nav.go(Routes.compose()) },
+                                onReply = { id, mode -> nav.go(Routes.compose(mode, id)) },
+                                onSettings = { nav.go("settings") },
                                 onOpenTab = { nav.switchTab(it) },
                                 snackbar = snackbar,
                             )
@@ -211,15 +261,15 @@ fun AppNav(
                     composable("calendar") {
                         Box(tabPage) {
                             CalendarScreen(
-                                onOpenEvent = { nav.navigate(Routes.event(it)) },
-                                onNewEvent = { nav.navigate(Routes.eventEdit(date = it)) },
+                                onOpenEvent = { nav.go(Routes.event(it)) },
+                                onNewEvent = { nav.go(Routes.eventEdit(date = it)) },
                                 snackbar = snackbar,
                             )
                         }
                     }
                     composable("contacts") {
                         Box(tabPage) {
-                            ContactsScreen(onOpen = { email, id -> nav.navigate(Routes.contact(email, id)) })
+                            ContactsScreen(onOpen = { email, id -> nav.go(Routes.contact(email, id)) })
                         }
                     }
                     composable(
@@ -230,10 +280,10 @@ fun AppNav(
                         ),
                     ) {
                         MessageScreen(
-                            onBack = { nav.popBackStack() },
-                            onReply = { id, mode -> nav.navigate(Routes.compose(mode, id)) },
-                            onComposeTo = { nav.navigate(Routes.compose(to = it)) },
-                            onOpenContact = { nav.navigate(Routes.contact(it)) },
+                            onBack = { nav.back() },
+                            onReply = { id, mode -> nav.go(Routes.compose(mode, id)) },
+                            onComposeTo = { nav.go(Routes.compose(to = it)) },
+                            onOpenContact = { nav.go(Routes.contact(it)) },
                             snackbar = snackbar,
                             onOpenSibling = { id, direction ->
                                 Motion.openSibling(direction)
@@ -251,7 +301,7 @@ fun AppNav(
                         ),
                     ) {
                         ComposeScreen(
-                            onClose = { nav.popBackStack() },
+                            onClose = { nav.back() },
                             onSent = {
                                 nav.popBackStack()
                                 toast("Письмо отправлено")
@@ -264,10 +314,10 @@ fun AppNav(
                     }
                     composable("event/{id}", arguments = listOf(navArgument("id") { type = NavType.StringType })) {
                         EventScreen(
-                            onBack = { nav.popBackStack() },
-                            onEdit = { nav.navigate(Routes.eventEdit(id = it)) },
-                            onContact = { nav.navigate(Routes.contact(it)) },
-                            onMailto = { nav.navigate(Routes.compose(to = it)) },
+                            onBack = { nav.back() },
+                            onEdit = { nav.go(Routes.eventEdit(id = it)) },
+                            onContact = { nav.go(Routes.contact(it)) },
+                            onMailto = { nav.go(Routes.compose(to = it)) },
                             snackbar = snackbar,
                         )
                     }
@@ -280,32 +330,37 @@ fun AppNav(
                         ),
                     ) {
                         EventEditScreen(
-                            onClose = { nav.popBackStack() },
+                            onClose = { nav.back() },
                             onSaved = { msg ->
                                 // После изменения возвращаемся в календарь (карточка события могла устареть)
-                                if (!nav.popBackStack("calendar", inclusive = false)) nav.switchTab("calendar")
+                                if (!nav.popBackStack("calendar", inclusive = false)) {
+                                    // Встреча из карточки контакта или письма: форму убираем из стека этой вкладки,
+                                    // иначе она вернётся при следующем открытии вкладки
+                                    nav.popBackStack()
+                                    nav.switchTab("calendar")
+                                }
                                 if (msg.isNotBlank()) toast(msg)
                             },
                         )
                     }
                     composable(
-                        "contact/{email}?id={id}",
+                        "contact?email={email}&id={id}",
                         arguments = listOf(
-                            navArgument("email") { type = NavType.StringType },
+                            navArgument("email") { type = NavType.StringType; defaultValue = "" },
                             navArgument("id") { type = NavType.StringType; defaultValue = "" },
                         ),
                     ) {
                         ContactDetailScreen(
-                            onBack = { nav.popBackStack() },
-                            onWrite = { nav.navigate(Routes.compose(to = it)) },
-                            onMeeting = { nav.navigate(Routes.eventEdit(date = LocalDate.now(), to = it)) },
+                            onBack = { nav.back() },
+                            onWrite = { nav.go(Routes.compose(to = it)) },
+                            onMeeting = { nav.go(Routes.eventEdit(date = LocalDate.now(), to = it)) },
                         )
                     }
                     composable(
                         "settings?update={update}",
                         arguments = listOf(navArgument("update") { type = NavType.StringType; defaultValue = "0" }),
                     ) { entry ->
-                        SettingsScreen(onBack = { nav.popBackStack() }, offerUpdate = entry.arguments?.getString("update") == "1")
+                        SettingsScreen(onBack = { nav.back() }, offerUpdate = entry.arguments?.getString("update") == "1")
                     }
                 }
                 AnimatedVisibility(
@@ -335,6 +390,21 @@ private const val MESSAGE_ROUTE = "message/{id}?browse={browse}"
 
 /** Высота нижней панели вкладок Material 3 (без системной полосы навигации). */
 private val NAV_BAR_HEIGHT = 80.dp
+
+/**
+ * Переход по нажатию: только с полностью открытого экрана — двойное нажатие или нажатие во время анимации
+ * не открывает вторую копию экрана.
+ */
+private fun NavHostController.go(route: String) {
+    if (currentBackStackEntry?.lifecycle?.currentState == Lifecycle.State.RESUMED) navigate(route)
+}
+
+/** «Назад» по стрелке: один раз (не во время анимации закрытия) и никогда не убирает первый экран вкладки. */
+private fun NavHostController.back() {
+    val current = currentBackStackEntry ?: return
+    if (current.lifecycle.currentState != Lifecycle.State.RESUMED || previousBackStackEntry == null) return
+    popBackStack()
+}
 
 private fun NavHostController.switchTab(route: String) {
     navigate(route) {

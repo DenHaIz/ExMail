@@ -131,6 +131,10 @@ class ComposeViewModel @Inject constructor(
         private set
     var loading by mutableStateOf(refId != null)
         private set
+
+    /** Черновик не загрузился: сохранить или отправить — значит затереть его на сервере пустым. */
+    var draftLoadFailed by mutableStateOf(false)
+        private set
     var sending by mutableStateOf(false)
         private set
     private var initialBody = ""
@@ -182,7 +186,12 @@ class ComposeViewModel @Inject constructor(
                     }
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e // закрыли экран или начали новый запрос — это не ошибка
-                    _events.send(Event.Message(e.userMessage()))
+                    if (mode == "draft" && restored == null) {
+                        draftLoadFailed = true
+                        _events.send(Event.Message("Черновик не загрузился: ${e.userMessage()} Закройте его и откройте снова"))
+                    } else {
+                        _events.send(Event.Message(e.userMessage()))
+                    }
                 } finally {
                     loading = false
                 }
@@ -325,6 +334,7 @@ class ComposeViewModel @Inject constructor(
     }
 
     fun send() {
+        if (loading || draftLoadFailed) return
         if (sending) return
         if (!commitTyped()) {
             viewModelScope.launch { _events.send(Event.Message("Проверьте адрес получателя: он введён не полностью или с ошибкой")) }
@@ -359,6 +369,10 @@ class ComposeViewModel @Inject constructor(
 
     fun saveDraft() {
         if (sending) return
+        if (loading || draftLoadFailed) {
+            viewModelScope.launch { _events.send(Event.Message("Черновик ещё не загружен — сохранение затёрло бы его")) }
+            return
+        }
         commitTyped() // неверный адрес в черновике не мешает его сохранить
         sending = true
         viewModelScope.launch {
@@ -442,7 +456,7 @@ fun ComposeScreen(
                             )
                         }
                     }
-                    IconButton(onClick = ::trySend, enabled = !vm.sending && !vm.loading) {
+                    IconButton(onClick = ::trySend, enabled = !vm.sending && !vm.loading && !vm.draftLoadFailed) {
                         if (vm.sending) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
                         else Icon(Icons.AutoMirrored.Filled.Send, "Отправить", tint = MaterialTheme.colorScheme.primary)
                     }

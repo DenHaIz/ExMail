@@ -42,7 +42,8 @@ class NtlmAuthenticator(
     override fun authenticate(route: Route?, response: Response): Request? {
         val creds = credentials() ?: return null
         if (basic()) return basicAuth(creds, response)
-        val header = response.headers("WWW-Authenticate")
+        // Прокси может объединить способы в одну строку: «Negotiate, NTLM»
+        val header = response.headers("WWW-Authenticate").flatMap { it.split(',') }.map { it.trim() }
             .firstOrNull { it.equals("NTLM", true) || it.startsWith("NTLM ", true) } ?: return null
         val token = header.substring(4).trim()
         val previous = response.request.header("Authorization")

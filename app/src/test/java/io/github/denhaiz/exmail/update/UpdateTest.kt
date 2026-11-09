@@ -67,6 +67,7 @@ class UpdateTest {
         try {
             val updater = AppUpdater(context, scope).apply { insecureForTests = true }
             val release = AppRelease("9.9.9", "", server.url("/ExMail.apk").toString(), 300_000)
+            updater.sourcesForTests = listOf(release.apkUrl)
             updater.download(release)
             val end = withTimeout(10_000) {
                 updater.state.first { it is UpdateState.Failed || it is UpdateState.Ready }

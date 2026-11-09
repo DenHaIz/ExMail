@@ -12,6 +12,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import kotlinx.coroutines.withContext
 import io.github.denhaiz.exmail.BuildConfig
 import io.github.denhaiz.exmail.auth.NtlmCredentials
@@ -72,7 +74,14 @@ class AccountRepository @Inject constructor(
 
     init {
         scope.launch {
-            val saved = store.load()
+            // Ошибка чтения хранилища не должна оставить приложение на экране загрузки — тогда показываем вход
+            val saved = try {
+                store.load()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
             if (saved == null) {
                 _state.value = AccountState.LoggedOut
             } else {
@@ -80,7 +89,7 @@ class AccountRepository @Inject constructor(
                 session.config = EwsConfig(info.ewsUrl, NtlmCredentials.fromLogin(info.login, password), info.auth == AccountInfo.AUTH_BASIC)
                 session.mailbox = info.email
                 _state.value = AccountState.LoggedIn(info)
-                scheduler.schedule(store.currentSettings().syncMinutes)
+                runCatching { scheduler.schedule(store.currentSettings().syncMinutes) }
             }
         }
     }
@@ -96,7 +105,17 @@ class AccountRepository @Inject constructor(
         url: String = BuildConfig.DEFAULT_EWS_URL,
         options: LoginOptions = LoginOptions(),
     ) {
-        if (url.isNotBlank()) return loginAt(rawLogin, password, url, options)
+        // Поиск и вход целиком — не дольше LOGIN_TIMEOUT: иначе на плохой сети экран «Подключаемся…» висит минутами
+        withTimeoutOrNull(LOGIN_TIMEOUT_MILLIS) { loginOrFind(rawLogin, password, url, options); true }
+            ?: throw java.net.SocketTimeoutException("Вход занял больше ${LOGIN_TIMEOUT_MILLIS / 1000} с")
+    }
+
+    private suspend fun loginOrFind(rawLogin: String, password: String, url: String, options: LoginOptions) {
+        if (url.isNotBlank()) return loginWithRetry(rawLogin, password, url, options)
+        // Basic передаёт пароль как есть — только на адрес, который пользователь указал сам
+        if (options.auth == AccountInfo.AUTH_BASIC) {
+            throw IllegalArgumentException("Для входа по Basic укажите адрес сервера в «Дополнительных настройках»")
+        }
         val login = normalizeLogin(rawLogin, options.domain)
         val email = emailOf(login, options)
             ?: throw IllegalArgumentException("Введите рабочий e-mail, например ivanov@company.ru: по нему найдётся почтовый сервер")
@@ -107,19 +126,42 @@ class AccountRepository @Inject constructor(
                     "Укажите его адрес в «Дополнительных настройках» — его подскажет ИТ-отдел",
             )
         }
-        var last: Exception? = null
+        // Показываем самую содержательную ошибку: ответ сервера важнее обрыва связи с последним из адресов
+        var best: Exception? = null
         for (server in servers) {
             try {
-                return loginAt(rawLogin, password, server, options)
+                return loginWithRetry(rawLogin, password, server, options)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: EwsAuthException) {
                 throw e // неверный пароль: не перебираем серверы дальше, чтобы не заблокировать учётную запись
             } catch (e: Exception) {
-                last = e
+                if (best == null || (e is io.github.denhaiz.exmail.ews.EwsException && best !is io.github.denhaiz.exmail.ews.EwsException)) best = e
             }
         }
-        throw last ?: IllegalStateException("Не удалось войти")
+        throw best ?: IllegalStateException("Не удалось войти")
+    }
+
+    /**
+     * Вход с одной повторной попыткой при сбое связи: первое соединение (TLS + три шага NTLM) на медленной сети
+     * или через прокси иногда обрывается, а второе проходит. Неверный пароль не повторяется.
+     */
+    private suspend fun loginWithRetry(rawLogin: String, password: String, url: String, options: LoginOptions) {
+        try {
+            loginAt(rawLogin, password, url, options)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: EwsAuthException) {
+            throw e
+        } catch (e: Exception) {
+            // Повторяем сбой связи и временную недоступность сервера (502–504, «сервер занят»)
+            val transient = e is java.io.IOException ||
+                (e is io.github.denhaiz.exmail.ews.EwsHttpException && e.httpCode in 500..504) ||
+                (e is io.github.denhaiz.exmail.ews.EwsException && e.code == "ErrorServerBusy")
+            if (!transient) throw e
+            kotlinx.coroutines.delay(RETRY_DELAY_MILLIS)
+            loginAt(rawLogin, password, url, options)
+        }
     }
 
     private suspend fun loginAt(rawLogin: String, password: String, url: String, options: LoginOptions) {
@@ -130,6 +172,7 @@ class AccountRepository @Inject constructor(
         val previous = session.config
         dropConnections()
         session.config = EwsConfig(ewsUrl, NtlmCredentials.fromLogin(login, password), basic)
+        val info: AccountInfo
         try {
             client.getWellKnownFolders()
             val shortName = login.substringAfter('\\').substringBefore('@')
@@ -150,26 +193,28 @@ class AccountRepository @Inject constructor(
                 BuildConfig.DEFAULT_MAIL_DOMAIN.isNotBlank() -> "$shortName@${BuildConfig.DEFAULT_MAIL_DOMAIN}"
                 else -> login
             }
-            val info = AccountInfo(login, email, me?.displayName ?: email, ewsUrl, options.auth)
+            info = AccountInfo(login, email, me?.displayName ?: email, ewsUrl, options.auth)
             store.save(info, password)
-            withContext(Dispatchers.IO) {
-                db.clearAllTables()
-                mail.clearCache() // письма и картинки прежней учётной записи
-                listOf("attachments", "images", "photos").forEach { File(context.cacheDir, it).deleteRecursively() }
-            }
-            contacts.clearCache()
-            session.mailbox = info.email
-            _state.value = AccountState.LoggedIn(info)
-            scheduler.schedule(store.currentSettings().syncMinutes)
-            push.sync()
         } catch (e: Exception) {
             session.config = previous
             dropConnections()
             throw e
         }
+        // Вход проверен и сохранён: дальше ошибки (очистка кэша, расписание) не должны оставить «полувход»
+        withContext(kotlinx.coroutines.NonCancellable + Dispatchers.IO) {
+            runCatching { db.clearAllTables() }
+            runCatching { mail.clearCache() } // письма и картинки прежней учётной записи
+            listOf("attachments", "images", "photos").forEach { runCatching { File(context.cacheDir, it).deleteRecursively() } }
+        }
+        contacts.clearCache()
+        session.mailbox = info.email
+        _state.value = AccountState.LoggedIn(info)
+        runCatching { scheduler.schedule(store.currentSettings().syncMinutes) }
+        runCatching { push.sync() }
     }
 
-    private fun dropConnections() {
+    /** Отменяет запросы и закрывает соединения всех клиентов (в фоне: закрытие TLS — сетевая операция). */
+    private suspend fun dropConnections() = withContext(Dispatchers.IO) {
         client.evictConnections()
         photoClient.evictConnections()
         pushClient.evictConnections()
@@ -191,9 +236,12 @@ class AccountRepository @Inject constructor(
      * (как Outlook: с введёнными логином и паролем, только на адреса домена из e-mail).
      */
     private suspend fun findServers(login: String, password: String, email: String, options: LoginOptions): List<String> {
-        val probed = coroutineScope {
+        suspend fun probe() = coroutineScope {
             serverCandidates(email).map { url -> async { url.takeIf { EwsClient.isEwsEndpoint(it) } } }.awaitAll()
         }.filterNotNull()
+        // Второй проход: на холодной сети первая проверка может не успеть (у сервера есть недоступный адрес —
+        // OkHttp запоминает его и во второй раз сразу идёт по рабочему)
+        val probed = probe().ifEmpty { probe() }
         // Отвечает только узел Autodiscover — сначала спрашиваем у него основной адрес сервера
         if (probed.any { !isAutodiscoverHost(it) }) return orderServers(probed, null)
         val found = try {
@@ -202,8 +250,10 @@ class AccountRepository @Inject constructor(
             throw e
         } catch (_: Exception) {
             null
-        }
-        return orderServers(probed, found?.let(::normalizeUrl))
+        }?.let(::normalizeUrl)
+        // Autodiscover может вернуть внутренний адрес (доступный только из офиса): недоступный пробуем последним
+        if (found != null && !EwsClient.isEwsEndpoint(found)) return orderServers(probed, null) + found
+        return orderServers(probed, found)
     }
 
     /**
@@ -261,6 +311,9 @@ class AccountRepository @Inject constructor(
             }
         }
 
+        private const val RETRY_DELAY_MILLIS = 1_500L
+        private const val LOGIN_TIMEOUT_MILLIS = 150_000L
+
         /** Типовые адреса EWS для домена почты: так называют серверы Exchange чаще всего. */
         fun serverCandidates(email: String): List<String> {
             val d = email.substringAfter('@', "").trim().trimEnd('.').lowercase()
@@ -281,11 +334,15 @@ class AccountRepository @Inject constructor(
             return (direct + listOfNotNull(discovered) + viaAutodiscover).distinctBy { it.lowercase() }
         }
 
+        /** «mail.corp.ru», «https://mail.corp.ru/owa», «mail.corp.ru/EWS» → `https://mail.corp.ru/EWS/Exchange.asmx`. */
         fun normalizeUrl(raw: String): String {
             var s = raw.trim().ifBlank { BuildConfig.DEFAULT_EWS_URL }
-            if (!s.startsWith("http://", true) && !s.startsWith("https://", true)) s = "https://$s"
-            if (!s.contains("/EWS/", true)) s = s.trimEnd('/') + "/EWS/Exchange.asmx"
-            return s
+            // HTTP запрещён (пароль и письма — только по защищённому соединению)
+            if (s.startsWith("http://", true)) s = "https://" + s.substring(7)
+            if (!s.startsWith("https://", true)) s = "https://$s"
+            val url = s.toHttpUrlOrNull() ?: return s
+            if (url.encodedPath.endsWith(".asmx", ignoreCase = true)) return url.toString()
+            return url.newBuilder().encodedPath("/EWS/Exchange.asmx").query(null).fragment(null).build().toString()
         }
     }
 }

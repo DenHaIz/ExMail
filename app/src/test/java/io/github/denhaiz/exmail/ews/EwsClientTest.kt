@@ -109,8 +109,11 @@ class EwsClientTest {
 
     @Test
     fun sendMessage_buildsValidCreateItem() = runTest {
+        // Отправку OkHttp после обрыва не повторяет — на новом соединении сначала короткий запрос («прогрев»)
+        server.enqueue(MockResponse().setResponseCode(200).addHeader("Content-Type", "text/xml; charset=utf-8").setBody(fixture("CreateItemOk.xml")))
         enqueue("CreateItemOk.xml")
         client.sendMessage(OutgoingMessage(to = listOf("a@example.com"), subject = "Тест <1>", bodyHtml = "<p>Hi & bye</p>"))
+        assertTrue(server.takeRequest().body.readUtf8().contains("<m:GetFolder>"))
         val req = server.takeRequest().body.readUtf8()
         assertTrue(req.contains("MessageDisposition=\"SendAndSaveCopy\""))
         assertTrue(req.contains("<t:Subject>Тест &lt;1&gt;</t:Subject>"))

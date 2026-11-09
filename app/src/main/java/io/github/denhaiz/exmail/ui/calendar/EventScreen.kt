@@ -220,7 +220,10 @@ fun EventScreen(
                         })
                     }
                     if (e.reminderSet && e.reminderMinutes != null) {
-                        InfoRow(Icons.Outlined.Notifications, "Напоминание за ${reminderText(e.reminderMinutes)}")
+                        InfoRow(
+                            Icons.Outlined.Notifications,
+                            if (e.reminderMinutes == 0) "Напоминание в момент начала" else "Напоминание за ${reminderText(e.reminderMinutes)}",
+                        )
                     }
                     e.organizer?.let { o ->
                         InfoRow(Icons.Outlined.Person, "Организатор: ${o.display}", onClick = { onContact(o.email) })
@@ -335,8 +338,8 @@ private fun InfoRow(icon: ImageVector, text: String, onClick: (() -> Unit)? = nu
 @Composable
 private fun AttendeeRow(a: Attendee, optional: Boolean, onContact: (String) -> Unit) {
     val (icon, tint, label) = when (a.response) {
-        "Accept", "Organizer" -> Triple(Icons.Outlined.CheckCircle, Color(0xFF2E7D32), "принял(а)")
-        "Tentative" -> Triple(Icons.AutoMirrored.Outlined.Help, Color(0xFFE65100), "под вопросом")
+        "Accept", "Organizer" -> Triple(Icons.Outlined.CheckCircle, io.github.denhaiz.exmail.ui.theme.successColor(), "принял(а)")
+        "Tentative" -> Triple(Icons.AutoMirrored.Outlined.Help, io.github.denhaiz.exmail.ui.theme.warningColor(), "под вопросом")
         "Decline" -> Triple(Icons.Outlined.HighlightOff, MaterialTheme.colorScheme.error, "отклонил(а)")
         else -> Triple(Icons.Outlined.AccessTime, MaterialTheme.colorScheme.outline, "нет ответа")
     }

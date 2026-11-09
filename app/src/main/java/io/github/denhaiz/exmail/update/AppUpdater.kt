@@ -17,6 +17,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -49,6 +51,8 @@ data class AppRelease(
     val notes: String,
     val apkUrl: String,
     val size: Long,
+    /** Тот же файл через API GitHub (`…/releases/assets/<id>`): доступен и там, где не открывается github.com. */
+    val apiUrl: String = "",
 )
 
 sealed interface UpdateState {
@@ -77,15 +81,52 @@ class AppUpdater @Inject constructor(
     private val http = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
+        .followSslRedirects(false) // переадресация с HTTPS на HTTP не выполняется
         .build()
 
     private val _state = MutableStateFlow<UpdateState>(UpdateState.Idle)
     val state: StateFlow<UpdateState> = _state.asStateFlow()
 
+    /** Пользователь попросил обновить: после загрузки поставить (UpdateInstallHost, когда приложение на экране). */
+    private val _installRequested = MutableStateFlow(false)
+    val installRequested: StateFlow<Boolean> = _installRequested.asStateFlow()
+
+    /** «Обновить»: загрузка и установка по её окончании. */
+    fun start(release: AppRelease) {
+        _installRequested.value = true
+        download(release)
+    }
+
+    /** «Остановить». */
+    fun stop() {
+        _installRequested.value = false
+        cancelDownload()
+    }
+
+    /** «Установить» уже загруженное. */
+    fun requestInstall() {
+        _installRequested.value = true
+    }
+
+    fun installHandled() {
+        _installRequested.value = false
+    }
+
     private var job: Job? = null
+
+    /** Идущий запрос загрузки — «Остановить» закрывает соединение сразу, даже если сервер не отвечает. */
+    @Volatile
+    private var call: Call? = null
+
+    /** Время последней проверки (успешной или нет); 0 — не проверяли. */
+    @Volatile
+    private var checkedAt = 0L
 
     /** Только для тестов с MockWebServer (HTTP): в приложении загрузка — только по HTTPS. */
     internal var insecureForTests = false
+
+    /** Только для тестов: источники загрузки вместо настоящих. */
+    internal var sourcesForTests: List<String>? = null
     private val dir get() = File(context.cacheDir, "updates")
 
     /** Последний выпуск или null, если в нём нет APK. */
@@ -115,12 +156,25 @@ class AppUpdater @Inject constructor(
                 throw e
             } catch (e: Exception) {
                 UpdateState.Failed(e.updateMessage(), null)
+            } finally {
+                checkedAt = System.currentTimeMillis()
             }
         }
     }
 
+    /**
+     * Проверка при открытии приложения, если прошлая была давно: процесс может жить днями (мгновенная доставка),
+     * и проверка при его запуске устаревает. Загруженное или загружаемое обновление не трогается.
+     */
+    fun refreshIfStale(maxAgeMillis: Long = STALE_MILLIS) {
+        val s = _state.value
+        if (s is UpdateState.Downloading || s is UpdateState.Ready) return
+        if (System.currentTimeMillis() - checkedAt > maxAgeMillis) check()
+    }
+
     /** Результат фоновой проверки: показывается в настройках, если там не идёт своя работа. */
     fun offer(release: AppRelease?) {
+        checkedAt = System.currentTimeMillis()
         if (job?.isActive == true) return
         val s = _state.value
         if (s is UpdateState.Ready || s is UpdateState.Downloading) return
@@ -131,48 +185,53 @@ class AppUpdater @Inject constructor(
         if (release != null && isNewer(release.version, BuildConfig.VERSION_NAME)) UpdateState.Available(release)
         else UpdateState.UpToDate(System.currentTimeMillis())
 
-    /** Загружает APK выпуска; по готовности — [UpdateState.Ready]. */
+    /**
+     * Загружает APK выпуска; по готовности — [UpdateState.Ready]. Источники по очереди: API GitHub, зеркало jsDelivr
+     * (тег `apk-v<версия>` в репозитории), ссылка выпуска — где-то github.com или его хранилище файлов недоступны.
+     * Подлинность файла от источника не зависит: проверяются пакет и versionCode, подпись — сам Android.
+     */
     fun download(release: AppRelease) {
         if (job?.isActive == true) return
-        if (!release.apkUrl.startsWith("https://", ignoreCase = true) && !insecureForTests) {
+        // Остановленная загрузка ещё может сворачиваться (закрывается соединение) — новая начнётся после неё
+        val previous = job
+        val sources = (sourcesForTests ?: downloadUrls(release)).filter { it.startsWith("https://", ignoreCase = true) || insecureForTests }
+        if (sources.isEmpty()) {
             _state.value = UpdateState.Failed("Адрес загрузки небезопасен", release)
             return
         }
         job = scope.launch(Dispatchers.IO) {
-            _state.value = UpdateState.Downloading(release, if (release.size > 0) 0f else -1f)
+            previous?.join()
             val file = File(dir, "ExMail-${release.version.replace(Regex("[^0-9A-Za-z.]"), "_")}.apk")
             val part = File(dir, file.name + ".part")
+            val failures = mutableListOf<String>()
             try {
                 dir.mkdirs()
-                val request = Request.Builder().url(release.apkUrl).header("User-Agent", "ExMail/${BuildConfig.VERSION_NAME}").build()
-                http.newCall(request).execute().use { r ->
-                    if (!r.isSuccessful) throw UpdateException("Сервер обновлений ответил ${r.code}")
-                    val body = r.body ?: throw UpdateException("Пустой ответ")
-                    val total = body.contentLength().takeIf { it > 0 } ?: release.size
-                    var done = 0L
-                    var shown = -1
-                    body.byteStream().use { input ->
-                        part.outputStream().use { out ->
-                            val buf = ByteArray(64 * 1024)
-                            while (true) {
-                                ensureActive()
-                                val n = input.read(buf)
-                                if (n < 0) break
-                                out.write(buf, 0, n)
-                                done += n
-                                val percent = if (total > 0) (done * 100 / total).toInt() else -1
-                                if (percent != shown) { // не чаще раза на процент
-                                    shown = percent
-                                    _state.value = UpdateState.Downloading(release, if (total > 0) done.toFloat() / total else -1f)
-                                }
-                            }
-                        }
+                var loaded = false
+                for (url in sources) {
+                    ensureActive()
+                    _state.value = UpdateState.Downloading(release, if (release.size > 0) 0f else -1f)
+                    try {
+                        fetch(url, part, release)
+                        loaded = true
+                        break
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        ensureActive() // «Остановить» закрывает соединение — это не ошибка источника
+                        part.delete()
+                        failures += "${url.toHttpUrlOrNull()?.host ?: url}: ${e.updateMessage()}"
                     }
                 }
+                if (!loaded) throw UpdateException("Не удалось загрузить (" + failures.joinToString("; ") + ")")
                 file.delete()
                 if (!part.renameTo(file)) throw UpdateException("Не удалось сохранить файл")
                 verify(file)
+                ensureActive()
                 _state.value = UpdateState.Ready(release, file)
+                // Загрузилось, пока приложение свёрнуто, — напоминаем уведомлением (установщик из фона не откроется)
+                if (!io.github.denhaiz.exmail.sync.AppVisibility.isVisible()) {
+                    io.github.denhaiz.exmail.sync.Notifications.showUpdate(context, release, ready = true)
+                }
             } catch (e: CancellationException) {
                 part.delete()
                 _state.value = UpdateState.Available(release)
@@ -181,12 +240,54 @@ class AppUpdater @Inject constructor(
                 part.delete()
                 file.delete()
                 _state.value = UpdateState.Failed(e.updateMessage(), release)
+            } finally {
+                call = null
             }
         }
     }
 
+    private fun CoroutineScope.fetch(url: String, part: File, release: AppRelease) {
+        val request = Request.Builder()
+            .url(url)
+            .header("User-Agent", "ExMail/${BuildConfig.VERSION_NAME}")
+            // API GitHub отдаёт сам файл (через переадресацию), а не его описание
+            .apply { if (url.startsWith(API_ASSETS, ignoreCase = true)) header("Accept", "application/octet-stream") }
+            .build()
+        val c = http.newCall(request)
+        call = c
+        ensureActive() // «Остановить» между источниками: новый запрос не начинаем
+        c.execute().use { r ->
+            if (!r.isSuccessful) throw UpdateException("ответ ${r.code}")
+            val body = r.body ?: throw UpdateException("пустой ответ")
+            val total = body.contentLength().takeIf { it > 0 } ?: release.size
+            var done = 0L
+            var shown = -1
+            body.byteStream().use { input ->
+                part.outputStream().use { out ->
+                    val buf = ByteArray(64 * 1024)
+                    while (true) {
+                        ensureActive()
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        out.write(buf, 0, n)
+                        done += n
+                        val percent = if (total > 0) (done * 100 / total).toInt() else -1
+                        if (percent != shown) { // не чаще раза на процент
+                            shown = percent
+                            _state.value = UpdateState.Downloading(release, if (total > 0) done.toFloat() / total else -1f)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /** «Остановить»: загрузка прерывается сразу, окно возвращается к предложению обновиться. */
     fun cancelDownload() {
-        if (_state.value is UpdateState.Downloading) job?.cancel()
+        val s = _state.value as? UpdateState.Downloading ?: return
+        job?.cancel()
+        call?.cancel()
+        _state.value = UpdateState.Available(s.release)
     }
 
     /** Загруженный файл — это ExMail и новее установленной: иначе установщик выдал бы непонятную ошибку. */
@@ -220,7 +321,17 @@ class AppUpdater @Inject constructor(
     }
 
     companion object {
-        private const val LATEST_URL = "https://api.github.com/repos/DenHaIz/ExMail/releases/latest"
+        private const val REPO = "DenHaIz/ExMail"
+        private const val LATEST_URL = "https://api.github.com/repos/$REPO/releases/latest"
+        private const val API_ASSETS = "https://api.github.com/repos/$REPO/releases/assets/"
+        private const val STALE_MILLIS = 6 * 60 * 60 * 1000L
+
+        /** Источники загрузки по порядку (см. [download]). */
+        fun downloadUrls(r: AppRelease): List<String> = listOf(
+            r.apiUrl,
+            "https://cdn.jsdelivr.net/gh/$REPO@apk-v${r.version}/ExMail.apk",
+            r.apkUrl,
+        ).filter { it.isNotBlank() }.distinct()
         const val APK_MIME = "application/vnd.android.package-archive"
 
         /** Выпуск из ответа GitHub API; null — в выпуске нет APK. */
@@ -236,6 +347,7 @@ class AppUpdater @Inject constructor(
                     notes = o.optString("body"),
                     apkUrl = a.optString("browser_download_url"),
                     size = a.optLong("size"),
+                    apiUrl = a.optString("url").takeIf { it.startsWith(API_ASSETS, ignoreCase = true) }.orEmpty(),
                 )
             }
             return null

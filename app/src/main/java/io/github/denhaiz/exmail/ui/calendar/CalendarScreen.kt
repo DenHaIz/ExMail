@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
@@ -478,7 +479,7 @@ fun EventCard(e: EventEntity, onClick: () -> Unit) {
     ) {
         Row(Modifier.height(IntrinsicSize.Min)) {
             Box(Modifier.width(5.dp).fillMaxHeight().background(accent))
-            Column(Modifier.width(76.dp).padding(start = 12.dp, end = 4.dp, top = 12.dp, bottom = 12.dp)) {
+            Column(Modifier.widthIn(min = 76.dp).padding(start = 12.dp, end = 4.dp, top = 12.dp, bottom = 12.dp)) {
                 if (e.isAllDay) {
                     Text("весь день", style = MaterialTheme.typography.labelSmall, maxLines = 1, softWrap = false)
                 } else {
@@ -526,7 +527,7 @@ fun EventCard(e: EventEntity, onClick: () -> Unit) {
 private fun responseLabel(e: EventEntity): Pair<String, Color>? = when {
     e.isCancelled -> "Отменена" to MaterialTheme.colorScheme.error
     !e.isMeeting -> null
-    e.myResponse == "Tentative" -> "Под вопросом" to Color(0xFFE65100)
+    e.myResponse == "Tentative" -> "Под вопросом" to io.github.denhaiz.exmail.ui.theme.warningColor()
     e.myResponse == "NoResponseReceived" || e.myResponse == "Unknown" -> "Ожидает ответа" to MaterialTheme.colorScheme.primary
     else -> null
 }

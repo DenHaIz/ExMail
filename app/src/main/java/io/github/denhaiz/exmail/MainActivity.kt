@@ -153,9 +153,12 @@ class MainActivity : ComponentActivity() {
 
     /** Нажато уведомление о новой версии; флаг убирается из intent, чтобы не открыть настройки ещё раз. */
     private fun Intent.takeOpenUpdate(): Boolean =
-        getBooleanExtra(Notifications.EXTRA_OPEN_UPDATE, false).also { removeExtra(Notifications.EXTRA_OPEN_UPDATE) }
+        !fromRecents() && getBooleanExtra(Notifications.EXTRA_OPEN_UPDATE, false).also { removeExtra(Notifications.EXTRA_OPEN_UPDATE) }
+
+    /** Открыто из «Недавних»: Android повторяет исходный intent уведомления — его действие уже выполнено. */
+    private fun Intent.fromRecents() = flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0
 
     /** id письма из уведомления; убирается из intent, чтобы не открыть письмо ещё раз. */
     private fun Intent.takeMessageId(): String? =
-        getStringExtra(Notifications.EXTRA_MESSAGE_ID)?.also { removeExtra(Notifications.EXTRA_MESSAGE_ID) }
+        getStringExtra(Notifications.EXTRA_MESSAGE_ID)?.also { removeExtra(Notifications.EXTRA_MESSAGE_ID) }?.takeUnless { fromRecents() }
 }

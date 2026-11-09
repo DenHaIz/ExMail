@@ -41,11 +41,9 @@ class ExMailApp : Application(), Configuration.Provider {
         Notifications.createChannels(this)
         // Письма и картинки старше двух недель — из кэша
         scope.launch(Dispatchers.IO) { runCatching { mailCache.trim() } }
-        // Обновления: старые загрузки удаляются; проверка — сейчас и раз в 12 часов
-        scope.launch(Dispatchers.IO) {
-            runCatching { updater.cleanup() }
-            runCatching { updateChecker.check() }
-        }
+        // Обновления: старые загрузки удаляются; проверка — при открытии приложения (AppNav) и раз в 12 часов в фоне.
+        // Не при каждом запуске процесса: его запускают и фоновые задачи, а GitHub без входа отвечает 60 раз в час на адрес
+        scope.launch(Dispatchers.IO) { runCatching { updater.cleanup() } }
         runCatching { updateChecker.schedule() }
     }
 }

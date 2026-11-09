@@ -302,7 +302,7 @@ fun MailListScreen(
                                 "Здесь пока пусто",
                                 "В папке «${folder?.name.orEmpty()}» нет писем. Потяните вниз, чтобы обновить.",
                             )
-                            else -> MessageList(messages, listState, vm.loadingMore, vm::loadMore, actions)
+                            else -> MessageList(messages, listState, vm.loadingMore, vm::loadMore, actions, retryKey = vm.refreshing)
                         }
                     }
                 }
@@ -645,6 +645,8 @@ private fun MessageList(
     loadingMore: Boolean,
     onEndReached: () -> Unit,
     actions: MessageActions,
+    /** Меняется после обновления папки (в т.ч. «Повторить» после ошибки) — подгрузка в конце списка повторяется. */
+    retryKey: Any? = null,
 ) {
     val nearEnd by remember {
         derivedStateOf {
@@ -652,7 +654,8 @@ private fun MessageList(
             last >= state.layoutInfo.totalItemsCount - 5
         }
     }
-    LaunchedEffect(nearEnd, messages.size) { if (nearEnd && messages.size >= 20) onEndReached() }
+    // И после ошибки или окончания обновления: иначе внизу списка «загрузить ещё» больше не повторяется
+    LaunchedEffect(nearEnd, messages.size, retryKey) { if (nearEnd && messages.size >= 20) onEndReached() }
 
     LazyColumn(state = state, modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 88.dp)) {
         items(messages, key = { it.id }, contentType = { "message" }) { m ->

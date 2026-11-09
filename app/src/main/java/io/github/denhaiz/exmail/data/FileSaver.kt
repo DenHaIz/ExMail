@@ -20,7 +20,14 @@ object FileSaver {
     const val FOLDER = "ExMail"
 
     fun safeName(name: String): String = name.replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001F]"), "_").trim()
-        .takeUnless { it.isBlank() || it.all { c -> c == '.' } } ?: "file" // «.» и «..» — это папки, а не имя файла
+        .takeUnless { it.isBlank() || it.all { c -> c == '.' } }?.let(::shorten) ?: "file" // «.» и «..» — это папки, а не имя файла
+
+    /** Не длиннее 120 символов (предел файловой системы — 255 байт, кириллица — 2 байта), расширение сохраняется. */
+    private fun shorten(name: String): String {
+        if (name.length <= 120) return name
+        val ext = name.substringAfterLast('.', "").take(10)
+        return if (ext.isEmpty()) name.take(120) else name.take(120 - ext.length - 1) + "." + ext
+    }
 
     fun mimeOf(name: String, fallback: String): String =
         MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase())
