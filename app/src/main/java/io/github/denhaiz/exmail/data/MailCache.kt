@@ -24,7 +24,8 @@ import javax.inject.Singleton
 /**
  * Дисковый кэш писем и картинок из них (в личной папке приложения, удаляется при выходе).
  * Полученное письмо не меняется, поэтому повторное открытие — без запроса к серверу,
- * а картинки, встроенные в письма и загруженные из интернета, хранятся [MAX_AGE_DAYS] дней.
+ * а картинки, встроенные в письма и загруженные из интернета, хранятся [retentionDays] дней (настройка «Хранить письма»).
+ * 0 — не хранить: письма и картинки загружаются при каждом открытии, временные файлы удаляются при запуске.
  */
 @Singleton
 class MailCache @Inject constructor(@ApplicationContext context: Context) {
@@ -34,8 +35,31 @@ class MailCache @Inject constructor(@ApplicationContext context: Context) {
     /** HTTP-кэш картинок из интернета. */
     private val web = File(context.cacheDir, "mail-web")
 
-    /** Клиент для картинок из интернета с кэшем на [MAX_AGE_DAYS] дней. */
-    val http: OkHttpClient by lazy {
+    /** Срок хранения, дней (из настроек); 0 — не хранить. */
+    @Volatile
+    var retentionDays: Int = MAX_AGE_DAYS.toInt()
+        private set
+    val enabled: Boolean get() = retentionDays > 0
+    private val maxAgeMillis: Long get() = TimeUnit.DAYS.toMillis(retentionDays.toLong())
+
+    /** Новый срок: сокращение — сразу удаляем то, что старше; «не хранить» — удаляем всё. */
+    fun setRetention(days: Int) {
+        val shorter = days < retentionDays
+        retentionDays = days.coerceAtLeast(0)
+        if (!enabled) clear() else if (shorter) trim()
+    }
+
+    /** Клиент для картинок из интернета: с кэшем, пока хранение включено. */
+    val http: OkHttpClient get() = if (enabled) cachedHttp else plainHttp
+
+    private val plainHttp: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .build()
+    }
+
+    private val cachedHttpLazy = lazy {
         OkHttpClient.Builder()
             .cache(Cache(web, WEB_CACHE_BYTES))
             // Картинки в письмах не меняются: храним их, даже если сервер рассылки запрещает кэш
@@ -45,15 +69,22 @@ class MailCache @Inject constructor(@ApplicationContext context: Context) {
                 else r.newBuilder()
                     .removeHeader("Pragma")
                     .removeHeader("Expires")
-                    .header("Cache-Control", "public, max-age=${TimeUnit.DAYS.toSeconds(MAX_AGE_DAYS)}")
+                    .header("Cache-Control", "public, max-age=${TimeUnit.DAYS.toSeconds(retentionDays.toLong().coerceAtLeast(1))}")
                     .build()
             }
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
             .build()
     }
+    private val cachedHttp: OkHttpClient by cachedHttpLazy
+
+    /** Очистка HTTP-кэша картинок; если клиент ещё не создавался — просто удаляем папку. */
+    private fun clearWeb() {
+        if (cachedHttpLazy.isInitialized()) runCatching { cachedHttp.cache?.evictAll() } else web.deleteRecursively()
+    }
 
     fun readMessage(id: String): MessageDetail? {
+        if (!enabled) return null
         val file = File(messages, key(id))
         if (!file.isFile || expired(file)) return null
         return runCatching { MessageCodec.decode(file.readBytes()) }.getOrNull()?.takeIf { it.ref.id == id }
@@ -65,7 +96,7 @@ class MailCache @Inject constructor(@ApplicationContext context: Context) {
         private set
 
     fun writeMessage(detail: MessageDetail, generation: Int) {
-        if (generation != this.generation) return
+        if (generation != this.generation || !enabled) return
         runCatching {
             messages.mkdirs()
             atomicWrite(File(messages, key(detail.ref.id)), MessageCodec.encode(detail))
@@ -78,6 +109,7 @@ class MailCache @Inject constructor(@ApplicationContext context: Context) {
 
     /** Встроенная картинка по id вложения: файл и MIME-тип или null. */
     fun image(attachmentId: String): Pair<File, String>? {
+        if (!enabled) return null // файл мог остаться от текущего показа письма — повторно не используем
         val base = key(attachmentId)
         val file = File(images, "$base.img")
         if (!file.isFile || expired(file)) return null
@@ -104,18 +136,28 @@ class MailCache @Inject constructor(@ApplicationContext context: Context) {
     /** Расширение файла для сохранения картинки по её MIME-типу. */
     fun extensionOf(mime: String): String = MimeTypeMap.getSingleton().getExtensionFromMimeType(mime) ?: "png"
 
-    /** Удаляет записи старше [MAX_AGE_DAYS] дней (вызывается при запуске, в фоне). */
+    /** Удаляет записи старше срока хранения (при запуске и при смене настройки, в фоне). */
     fun trim() {
+        if (!enabled) {
+            listOf(messages, images).forEach { it.deleteRecursively() }
+            clearWeb()
+            return
+        }
         listOf(messages, images).forEach { dir -> dir.listFiles()?.filter(::expired)?.forEach { it.delete() } }
+    }
+
+    /** Сколько занимают письма и картинки на телефоне, байт. */
+    fun sizeBytes(): Long = listOf(messages, images, web).sumOf { dir ->
+        dir.walkTopDown().filter { it.isFile && !it.name.startsWith("journal") }.sumOf { it.length() } // журнал HTTP-кэша — служебный
     }
 
     fun clear() {
         generation++
         listOf(messages, images).forEach { it.deleteRecursively() }
-        runCatching { http.cache?.evictAll() }
+        clearWeb()
     }
 
-    private fun expired(f: File) = System.currentTimeMillis() - f.lastModified() > MAX_AGE_MILLIS
+    private fun expired(f: File) = System.currentTimeMillis() - f.lastModified() > maxAgeMillis
 
     /** Запись через уникальный временный файл: два одновременных писателя не испортят друг другу данные. */
     private fun atomicWrite(target: File, bytes: ByteArray) {

@@ -33,6 +33,8 @@ import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.SwipeLeft
 import androidx.compose.material.icons.outlined.SwipeRight
 import androidx.compose.material.icons.outlined.Sync
+import androidx.compose.material.icons.outlined.DeleteSweep
+import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material.icons.outlined.SystemUpdate
 import androidx.compose.material.icons.outlined.NewReleases
 import androidx.compose.material3.AlertDialog
@@ -111,7 +113,29 @@ class SettingsViewModel @Inject constructor(
     private val scheduler: SyncScheduler,
     val push: PushController,
     val updater: AppUpdater,
+    private val mailCache: io.github.denhaiz.exmail.data.MailCache,
 ) : ViewModel() {
+    /** Сколько занимают письма и картинки на телефоне; null — ещё считается. */
+    var cacheSize by mutableStateOf<Long?>(null)
+        private set
+
+    fun refreshCacheSize() = viewModelScope.launch {
+        cacheSize = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { runCatching { mailCache.sizeBytes() }.getOrDefault(0L) }
+    }
+
+    fun setCacheDays(days: Int) = viewModelScope.launch {
+        store.setCacheDays(days)
+        // Срок применяет ExMailApp (подписка на настройку); размер — после удаления лишнего
+        kotlinx.coroutines.delay(300)
+        refreshCacheSize()
+    }
+
+    fun clearCache() = viewModelScope.launch {
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { runCatching { mailCache.clear() } }
+        refreshCacheSize()
+        oofMessage = "Сохранённые письма и картинки удалены"
+    }
+
     val account = accounts.current
     val settings = store.settings.stateIn(viewModelScope, SharingStarted.Eagerly, AppSettings())
 
@@ -221,6 +245,10 @@ fun SettingsScreen(
     var editOof by remember { mutableStateOf(false) }
     var pickTheme by remember { mutableStateOf(false) }
     var pickSwipe by remember { mutableStateOf<Boolean?>(null) } // true — вправо, false — влево
+    var pickCache by remember { mutableStateOf(false) }
+    // Мгновенная доставка работает только после выбора пользователя (вопрос при первом запуске или этот переключатель)
+    val pushOn = s.instantPush && s.pushAsked
+    LaunchedEffect(Unit) { vm.refreshCacheSize() }
     val snackbar = remember { SnackbarHostState() }
     LaunchedEffect(Unit) { vm.loadOof() }
     LaunchedEffect(vm.oofMessage) {
@@ -310,13 +338,13 @@ fun SettingsScreen(
             GatedSwitchRow(
                 Icons.Outlined.Bolt,
                 "Мгновенная доставка",
-                if (s.instantPush) "Письма приходят сразу: постоянное подключение к серверу, значок «Почта на связи» в шторке"
+                if (pushOn) "Письма приходят сразу: постоянное подключение к серверу, значок «Почта на связи» в шторке"
                 else "Выключена — почта проверяется по расписанию",
-                s.instantPush && s.notifications,
+                pushOn && s.notifications,
                 enabled = s.notifications,
                 disabledHint = "Включите «Новые письма», чтобы получать письма сразу",
             ) { on -> vm.setInstantPush(on) }
-            if (s.notifications && s.instantPush) {
+            if (s.notifications && pushOn) {
                 ClickRow(
                     Icons.Outlined.BatteryChargingFull,
                     "Работа в фоне",
@@ -328,7 +356,7 @@ fun SettingsScreen(
             }
             ClickRow(
                 Icons.Outlined.Sync,
-                if (s.instantPush && s.notifications) "Резервная проверка" else "Проверять почту",
+                if (pushOn && s.notifications) "Резервная проверка" else "Проверять почту",
                 intervalLabel(s.syncMinutes),
             ) { pickInterval = true }
 
@@ -352,6 +380,14 @@ fun SettingsScreen(
             Section("Жесты в списке писем")
             ClickRow(Icons.Outlined.SwipeRight, "Свайп вправо", s.swipeRight.title) { pickSwipe = true }
             ClickRow(Icons.Outlined.SwipeLeft, "Свайп влево", s.swipeLeft.title) { pickSwipe = false }
+
+            Section("Хранение данных")
+            ClickRow(Icons.Outlined.Storage, "Хранить письма на телефоне", cacheLabel(s.cacheDays)) { pickCache = true }
+            ClickRow(
+                Icons.Outlined.DeleteSweep,
+                "Очистить сохранённые письма",
+                vm.cacheSize?.let { "Занято: ${Format.size(it)}" } ?: "Считаем…",
+            ) { vm.clearCache() }
 
             Section("Обновления")
             UpdateRow(update) {
@@ -449,6 +485,34 @@ fun SettingsScreen(
             onDismiss = { updateDialog = false },
         )
     }
+    if (pickCache) {
+        AlertDialog(
+            onDismissRequest = { pickCache = false },
+            title = { Text("Хранить письма на телефоне") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    AppSettings.CACHE_CHOICES.forEach { d ->
+                        Row(
+                            Modifier.fillMaxWidth().clickable { vm.setCacheDays(d); pickCache = false }.padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(selected = s.cacheDays == d, onClick = { vm.setCacheDays(d); pickCache = false })
+                            Text(cacheLabel(d))
+                        }
+                    }
+                    Text(
+                        "Открытые письма и картинки из них сохраняются, чтобы снова открываться сразу и без интернета. " +
+                            "«Не хранить» — загружаются при каждом открытии, на телефоне ничего не остаётся. " +
+                            "Список писем, календарь и контакты хранятся всегда — без них приложение не работает.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+            },
+            confirmButton = { TextButton(onClick = { pickCache = false }) { Text("Закрыть") } },
+        )
+    }
     pickSwipe?.let { right ->
         val selected = if (right) s.swipeRight else s.swipeLeft
         fun pick(a: SwipeAction) {
@@ -542,6 +606,16 @@ private fun UpdateRow(state: UpdateState, onClick: () -> Unit) {
         },
         modifier = Modifier.clickable(onClick = onClick),
     )
+}
+
+private fun cacheLabel(days: Int) = when (days) {
+    0 -> "Не хранить"
+    1 -> "1 день"
+    3 -> "3 дня"
+    7 -> "Неделю"
+    14 -> "2 недели (по умолчанию)"
+    30 -> "Месяц"
+    else -> Format.plural(days, "день", "дня", "дней")
 }
 
 private fun themeLabel(t: String) = when (t) {

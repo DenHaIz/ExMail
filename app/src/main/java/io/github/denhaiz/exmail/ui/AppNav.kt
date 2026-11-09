@@ -50,6 +50,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -118,6 +119,9 @@ class AppNavViewModel @Inject constructor(
 
     fun batteryAsked() = viewModelScope.launch { store.setBatteryAsked() }
 
+    /** Ответ на вопрос о мгновенной доставке при первом запуске. */
+    fun choosePush(enabled: Boolean) = viewModelScope.launch { store.setInstantPush(enabled) }
+
     /** «Позже» в окне обновления: следующее напоминание — через 3 дня. */
     fun postponeUpdate(version: String) = viewModelScope.launch {
         store.setUpdatePostponed(version, System.currentTimeMillis() + UpdateChecker.REMIND_MILLIS)
@@ -144,18 +148,32 @@ fun AppNav(
     val motion = remember { Motion.Nav(tabOrder = { tabOrder }, zoomRoutes = { it?.startsWith("message/") == true }) }
     val context = LocalContext.current
 
-    // Разрешение на уведомления (Android 13+) — спрашиваем, только если ещё не выдано
-    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { navVm.push.syncAsync() }
-    var askBattery by remember { mutableStateOf(false) }
-    // Один раз объясняем, зачем снимать ограничения работы в фоне (иначе Android может отключать доставку писем)
-    LaunchedEffect(settings.instantPush, settings.notifications, settings.batteryAsked) {
-        askBattery = settings.instantPush && settings.notifications && !settings.batteryAsked && !navVm.push.isUnrestricted()
+    // Первый запуск, по очереди: разрешение на уведомления (Android 13+) → «Включить мгновенную доставку?» →
+    // если включили — «Разрешить работу в фоне без ограничений?». Вопросы — только по уже прочитанным настройкам:
+    // по значениям по умолчанию окно появилось бы и сразу пропало
+    var permissionDone by rememberSaveable { mutableStateOf(false) }
+    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        permissionDone = true
+        navVm.push.syncAsync()
     }
     LaunchedEffect(Unit) {
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) permission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        ) {
+            permission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            permissionDone = true
+        }
     }
+    val loadedSettings by navVm.settings.collectAsState(initial = null)
+    var batteryAnswered by rememberSaveable { mutableStateOf(false) }
+    val askPush = loadedSettings?.let { s ->
+        permissionDone && !s.pushAsked && s.notifications && NotificationManagerCompat.from(context).areNotificationsEnabled()
+    } == true
+    val askBattery = loadedSettings?.let { s ->
+        permissionDone && !batteryAnswered && s.pushAsked && s.instantPush && s.notifications && !s.batteryAsked &&
+            !navVm.push.isUnrestricted()
+    } == true
     LaunchedEffect(openMessageId) {
         if (openMessageId != null) {
             nav.navigate(Routes.message(openMessageId))
@@ -177,6 +195,7 @@ fun AppNav(
         val release = (u as? UpdateState.Available)?.release ?: (u as? UpdateState.Ready)?.release ?: return@LaunchedEffect
         // Открыто уведомлением — окно покажут настройки; уже обновляется по просьбе пользователя — окно не нужно
         if (openUpdate || route == "settings?update={update}" || navVm.updater.installRequested.value) return@LaunchedEffect
+        if (askPush || askBattery) return@LaunchedEffect // сначала вопросы первого запуска — окна не накладываются
         if (!updatePromptShown && !s.updatePostponed(release.version)) {
             updatePromptShown = true
             updatePrompt = true
@@ -201,25 +220,40 @@ fun AppNav(
         }
     }
 
-    if (askBattery) {
+    if (askPush) {
         AlertDialog(
-            onDismissRequest = { askBattery = false; navVm.batteryAsked() },
+            onDismissRequest = {}, // нужен ответ: от него зависит, как приходит почта
             icon = { Icon(Icons.Outlined.NotificationsActive, null) },
-            title = { Text("Письма — сразу") },
+            title = { Text("Мгновенная доставка писем") },
             text = {
                 Text(
-                    "Чтобы уведомления о новых письмах приходили без задержек, разрешите ExMail работать в фоне без ограничений. " +
-                        "Иначе Android может отключать подключение к почте для экономии заряда. Изменить можно в настройках приложения.",
+                    "Включить? Письма будут приходить сразу: ExMail держит подключение к почтовому серверу, " +
+                        "в шторке появится значок «Почта на связи». Без неё почта проверяется по расписанию, " +
+                        "и уведомления могут приходить с опозданием до 15 минут. Изменить можно в настройках.",
+                )
+            },
+            confirmButton = { TextButton(onClick = { navVm.choosePush(true) }) { Text("Включить") } },
+            dismissButton = { TextButton(onClick = { navVm.choosePush(false) }) { Text("Не нужно") } },
+        )
+    } else if (askBattery) {
+        AlertDialog(
+            onDismissRequest = { batteryAnswered = true; navVm.batteryAsked() },
+            icon = { Icon(Icons.Outlined.NotificationsActive, null) },
+            title = { Text("Стабильная доставка") },
+            text = {
+                Text(
+                    "Чтобы Android не отключал подключение к почте для экономии заряда, разрешите ExMail работать в фоне " +
+                        "без ограничений. Изменить можно в настройках приложения.",
                 )
             },
             confirmButton = {
                 TextButton(onClick = {
-                    askBattery = false
+                    batteryAnswered = true
                     navVm.batteryAsked()
                     runCatching { context.startActivity(navVm.push.unrestrictIntent()) }
                 }) { Text("Разрешить") }
             },
-            dismissButton = { TextButton(onClick = { askBattery = false; navVm.batteryAsked() }) { Text("Не сейчас") } },
+            dismissButton = { TextButton(onClick = { batteryAnswered = true; navVm.batteryAsked() }) { Text("Не сейчас") } },
         )
     }
 

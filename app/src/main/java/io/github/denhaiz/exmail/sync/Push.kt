@@ -196,7 +196,8 @@ class PushController @Inject constructor(
     /** Должна ли служба работать сейчас. */
     suspend fun shouldRun(): Boolean {
         val s = store.currentSettings()
-        return store.hasAccount() && s.notifications && s.instantPush &&
+        // До ответа на вопрос «Включить мгновенную доставку?» (первый запуск) служба не запускается
+        return store.hasAccount() && s.notifications && s.instantPush && s.pushAsked &&
             NotificationManagerCompat.from(context).areNotificationsEnabled()
     }
 

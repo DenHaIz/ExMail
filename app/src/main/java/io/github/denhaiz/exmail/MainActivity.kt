@@ -122,7 +122,7 @@ class MainActivity : ComponentActivity() {
         // а при смене настроек или входе/выходе — включаем или выключаем её
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                combine(store.settings, accounts.state) { s, a -> Triple(s.notifications, s.instantPush, a is AccountState.LoggedIn) }
+                combine(store.settings, accounts.state) { s, a -> listOf(s.notifications, s.instantPush, s.pushAsked, a is AccountState.LoggedIn) }
                     .distinctUntilChanged()
                     .collect { push.sync() }
             }

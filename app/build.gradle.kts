@@ -31,8 +31,8 @@ android {
         applicationId = "io.github.denhaiz.exmail"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.0.2"
+        versionCode = 4
+        versionName = "1.0.3"
         buildConfigField("String", "DEFAULT_EWS_URL", "\"${company("ewsUrl")}\"")
         buildConfigField("String", "DEFAULT_MAIL_DOMAIN", "\"${company("mailDomain")}\"")
     }

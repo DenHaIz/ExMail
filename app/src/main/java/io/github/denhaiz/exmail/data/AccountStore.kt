@@ -58,6 +58,10 @@ data class AppSettings(
     val instantPush: Boolean = true,
     /** Уже спрашивали про работу в фоне без ограничений. */
     val batteryAsked: Boolean = false,
+    /** Пользователь уже выбрал, нужна ли мгновенная доставка (до выбора служба не запускается). */
+    val pushAsked: Boolean = false,
+    /** Сколько дней хранить открытые письма и картинки на телефоне; 0 — не хранить. */
+    val cacheDays: Int = DEFAULT_CACHE_DAYS,
     /** Свайп по письму в списке слева направо. */
     val swipeRight: SwipeAction = SwipeAction.READ,
     /** Свайп по письму в списке справа налево. */
@@ -78,6 +82,8 @@ data class AppSettings(
         const val THEME_DARK = "dark"
 
         val DEFAULT_TABS = listOf("mail", "calendar", "contacts")
+        const val DEFAULT_CACHE_DAYS = 14
+        val CACHE_CHOICES = listOf(30, 14, 7, 3, 1, 0)
         val DEFAULT_GROUPS = listOf("tabs", "main", "user")
     }
 }
@@ -124,6 +130,8 @@ class AccountStore @Inject constructor(@ApplicationContext private val context: 
         val messageZoom = intPreferencesKey("message_zoom")
         val instantPush = booleanPreferencesKey("instant_push")
         val batteryAsked = booleanPreferencesKey("battery_asked")
+        val pushAsked = booleanPreferencesKey("push_asked")
+        val cacheDays = intPreferencesKey("cache_days")
         val swipeRight = stringPreferencesKey("swipe_right")
         val swipeLeft = stringPreferencesKey("swipe_left")
         val updateNotify = booleanPreferencesKey("update_notify")
@@ -160,6 +168,7 @@ class AccountStore @Inject constructor(@ApplicationContext private val context: 
             val theme = p[Keys.theme]
             val zoom = p[Keys.messageZoom]
             val dark = p[Keys.darkMessages]
+            val cacheDays = p[Keys.cacheDays]
             val right = p[Keys.swipeRight]
             val left = p[Keys.swipeLeft]
             val updateNotify = p[Keys.updateNotify]
@@ -171,6 +180,7 @@ class AccountStore @Inject constructor(@ApplicationContext private val context: 
             theme?.let { p[Keys.theme] = it }
             zoom?.let { p[Keys.messageZoom] = it }
             dark?.let { p[Keys.darkMessages] = it }
+            cacheDays?.let { p[Keys.cacheDays] = it }
             right?.let { p[Keys.swipeRight] = it }
             left?.let { p[Keys.swipeLeft] = it }
             updateNotify?.let { p[Keys.updateNotify] = it }
@@ -199,6 +209,8 @@ class AccountStore @Inject constructor(@ApplicationContext private val context: 
         messageZoom = (p[Keys.messageZoom] ?: 100).coerceIn(MIN_ZOOM, MAX_ZOOM),
         instantPush = p[Keys.instantPush] ?: true,
         batteryAsked = p[Keys.batteryAsked] ?: false,
+        pushAsked = p[Keys.pushAsked] ?: false,
+        cacheDays = (p[Keys.cacheDays] ?: AppSettings.DEFAULT_CACHE_DAYS).takeIf { it in AppSettings.CACHE_CHOICES } ?: AppSettings.DEFAULT_CACHE_DAYS,
         swipeRight = SwipeAction.of(p[Keys.swipeRight], SwipeAction.READ),
         swipeLeft = SwipeAction.of(p[Keys.swipeLeft], SwipeAction.NONE),
         updateNotify = p[Keys.updateNotify] ?: true,
@@ -220,7 +232,12 @@ class AccountStore @Inject constructor(@ApplicationContext private val context: 
     suspend fun setSyncMinutes(minutes: Int) = context.dataStore.edit { it[Keys.syncMinutes] = minutes }
     suspend fun setSignature(text: String) = context.dataStore.edit { it[Keys.signature] = text }
     suspend fun setLoadImages(enabled: Boolean) = context.dataStore.edit { it[Keys.loadImages] = enabled }
-    suspend fun setInstantPush(enabled: Boolean) = context.dataStore.edit { it[Keys.instantPush] = enabled }
+    /** Выбор пользователя (в настройках или в вопросе при первом запуске) — больше не спрашиваем. */
+    suspend fun setInstantPush(enabled: Boolean) = context.dataStore.edit {
+        it[Keys.instantPush] = enabled
+        it[Keys.pushAsked] = true
+    }
+    suspend fun setCacheDays(days: Int) = context.dataStore.edit { it[Keys.cacheDays] = days }
     suspend fun setBatteryAsked() = context.dataStore.edit { it[Keys.batteryAsked] = true }
     suspend fun setSwipeRight(action: SwipeAction) = context.dataStore.edit { it[Keys.swipeRight] = action.key }
     suspend fun setSwipeLeft(action: SwipeAction) = context.dataStore.edit { it[Keys.swipeLeft] = action.key }
