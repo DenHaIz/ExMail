@@ -19,7 +19,8 @@ import java.io.File
 object FileSaver {
     const val FOLDER = "ExMail"
 
-    fun safeName(name: String): String = name.replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001F]"), "_").trim().ifBlank { "file" }
+    fun safeName(name: String): String = name.replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001F]"), "_").trim()
+        .takeUnless { it.isBlank() || it.all { c -> c == '.' } } ?: "file" // «.» и «..» — это папки, а не имя файла
 
     fun mimeOf(name: String, fallback: String): String =
         MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase())

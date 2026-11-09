@@ -194,7 +194,8 @@ class AccountRepository @Inject constructor(
         val probed = coroutineScope {
             serverCandidates(email).map { url -> async { url.takeIf { EwsClient.isEwsEndpoint(it) } } }.awaitAll()
         }.filterNotNull()
-        if (probed.isNotEmpty()) return probed
+        // Отвечает только узел Autodiscover — сначала спрашиваем у него основной адрес сервера
+        if (probed.any { !isAutodiscoverHost(it) }) return orderServers(probed, null)
         val found = try {
             autodiscover(login, password, email, options)
         } catch (e: CancellationException) {
@@ -202,7 +203,7 @@ class AccountRepository @Inject constructor(
         } catch (_: Exception) {
             null
         }
-        return listOfNotNull(found?.let(::normalizeUrl))
+        return orderServers(probed, found?.let(::normalizeUrl))
     }
 
     /**
@@ -212,7 +213,8 @@ class AccountRepository @Inject constructor(
     private suspend fun autodiscover(login: String, password: String, email: String, options: LoginOptions): String? {
         val previous = session.config
         dropConnections()
-        session.config = EwsConfig("https://${email.substringAfter('@')}/EWS/Exchange.asmx", NtlmCredentials.fromLogin(login, password), options.auth == AccountInfo.AUTH_BASIC)
+        // Только NTLM: при поиске запросы идут на сайт домена, пароль открытым текстом (Basic) туда не отправляется
+        session.config = EwsConfig("https://${email.substringAfter('@')}/EWS/Exchange.asmx", NtlmCredentials.fromLogin(login, password), false)
         return try {
             client.autodiscover(email)
         } finally {
@@ -263,8 +265,20 @@ class AccountRepository @Inject constructor(
         fun serverCandidates(email: String): List<String> {
             val d = email.substringAfter('@', "").trim().trimEnd('.').lowercase()
             if (d.isEmpty() || d.any { it.isWhitespace() || it == '/' || it == ':' }) return emptyList()
-            return listOf("exchange.$d", "mail.$d", "owa.$d", "webmail.$d", "outlook.$d", "ex.$d", d)
+            // autodiscover.домен — обычно тот же сервер Exchange (его EWS отвечает и по этому имени)
+            return listOf("exchange.$d", "mail.$d", "owa.$d", "webmail.$d", "outlook.$d", "ex.$d", "autodiscover.$d", d)
                 .map { "https://$it/EWS/Exchange.asmx" }
+        }
+
+        private fun isAutodiscoverHost(url: String) = url.substringAfter("://").startsWith("autodiscover.", ignoreCase = true)
+
+        /**
+         * Порядок попыток входа: серверы, найденные по типовым именам; адрес из Autodiscover ([discovered]);
+         * в последнюю очередь — EWS на узле Autodiscover (если ответ Autodiscover не получен или его адрес недоступен).
+         */
+        fun orderServers(probed: List<String>, discovered: String?): List<String> {
+            val (viaAutodiscover, direct) = probed.partition(::isAutodiscoverHost)
+            return (direct + listOfNotNull(discovered) + viaAutodiscover).distinctBy { it.lowercase() }
         }
 
         fun normalizeUrl(raw: String): String {

@@ -3,7 +3,7 @@
 Android-клиент Microsoft Exchange (EWS, NTLMv2 или Basic): почта с мгновенными уведомлениями, календарь, контакты, светлая и тёмная тема.
 Сервер находится по рабочему e-mail при входе; адрес можно указать и вручную.
 
-**APK:** [Releases](https://github.com/DenHaIz/ExMail/releases) (текущая — **1.0**) · Android 8+ · обновляется из приложения (Настройки → «Обновления»)
+**APK:** [Releases](https://github.com/DenHaIz/ExMail/releases) (текущая — **1.0.1**) · Android 8+ · обновляется из приложения (Настройки → «Обновления»)
 
 ## Сборка
 

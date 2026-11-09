@@ -505,7 +505,7 @@ class MailRepository @Inject constructor(
             ?: throw IllegalStateException("Сервер не отдал вложение")
         return withContext(Dispatchers.IO) {
             val dir = File(context.cacheDir, "attachments/${att.id.hashCode().toUInt()}").apply { mkdirs() }
-            val safeName = att.name.replace(Regex("[\\\\/:*?\"<>|]"), "_").ifBlank { "attachment" }
+            val safeName = FileSaver.safeName(att.name)
             File(dir, safeName).apply { writeBytes(data.bytes) }
         }
     }

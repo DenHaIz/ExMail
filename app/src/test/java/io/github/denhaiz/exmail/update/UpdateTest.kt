@@ -65,7 +65,7 @@ class UpdateTest {
         val context = ApplicationProvider.getApplicationContext<Application>()
         val scope = CoroutineScope(SupervisorJob())
         try {
-            val updater = AppUpdater(context, scope)
+            val updater = AppUpdater(context, scope).apply { insecureForTests = true }
             val release = AppRelease("9.9.9", "", server.url("/ExMail.apk").toString(), 300_000)
             updater.download(release)
             val end = withTimeout(10_000) {

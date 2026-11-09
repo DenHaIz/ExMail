@@ -48,6 +48,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -136,7 +137,8 @@ class LoginViewModel @Inject constructor(private val accounts: AccountRepository
 @Composable
 fun LoginScreen(vm: LoginViewModel = hiltViewModel()) {
     var login by rememberSaveable { mutableStateOf("") }
-    var password by rememberSaveable { mutableStateOf("") }
+    // Пароль не сохраняется в состоянии экрана: Android может записать его на диск при выгрузке приложения
+    var password by remember { mutableStateOf("") }
     var server by rememberSaveable { mutableStateOf(BuildConfig.DEFAULT_EWS_URL) }
     var showPassword by rememberSaveable { mutableStateOf(false) }
     var advanced by rememberSaveable { mutableStateOf(false) }

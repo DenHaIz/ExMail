@@ -83,6 +83,9 @@ class AppUpdater @Inject constructor(
     val state: StateFlow<UpdateState> = _state.asStateFlow()
 
     private var job: Job? = null
+
+    /** Только для тестов с MockWebServer (HTTP): в приложении загрузка — только по HTTPS. */
+    internal var insecureForTests = false
     private val dir get() = File(context.cacheDir, "updates")
 
     /** Последний выпуск или null, если в нём нет APK. */
@@ -131,6 +134,10 @@ class AppUpdater @Inject constructor(
     /** Загружает APK выпуска; по готовности — [UpdateState.Ready]. */
     fun download(release: AppRelease) {
         if (job?.isActive == true) return
+        if (!release.apkUrl.startsWith("https://", ignoreCase = true) && !insecureForTests) {
+            _state.value = UpdateState.Failed("Адрес загрузки небезопасен", release)
+            return
+        }
         job = scope.launch(Dispatchers.IO) {
             _state.value = UpdateState.Downloading(release, if (release.size > 0) 0f else -1f)
             val file = File(dir, "ExMail-${release.version.replace(Regex("[^0-9A-Za-z.]"), "_")}.apk")

@@ -49,6 +49,13 @@ class EwsSession {
     var mailbox: String? = null
 }
 
+/** Результат Autodiscover. */
+sealed interface AutodiscoverResult {
+    data class Found(val ewsUrl: String) : AutodiscoverResult
+    data class RedirectAddress(val email: String) : AutodiscoverResult
+    data class RedirectUrl(val url: String) : AutodiscoverResult
+}
+
 /**
  * Клиент Exchange Web Services (схема Exchange 2013 SP1 и новее).
  *
@@ -254,26 +261,28 @@ class EwsClient(
      * Autodiscover (POX): адрес EWS по e-mail. Пробует https://домен и https://autodiscover.домен
      * с текущими учётными данными сессии. Возвращает null, если найти не удалось.
      */
-    suspend fun autodiscover(email: String): String? {
+    suspend fun autodiscover(email: String): String? = autodiscover(email, null, 0)
+
+    /**
+     * [urls] — адреса Autodiscover вместо стандартных (`https://домен/…`, затем `https://autodiscover.домен/…`).
+     * Сервер может переадресовать на другой адрес почты (`redirectAddr`) или другой URL (`redirectUrl`, только HTTPS) —
+     * переход не больше двух раз.
+     */
+    internal suspend fun autodiscover(email: String, urls: List<String>?, depth: Int): String? {
         val domain = email.substringAfter('@', "").trim().lowercase()
-        if (domain.isEmpty()) return null
+        if (domain.isEmpty() || depth > 2) return null
         val request = """<?xml version="1.0" encoding="utf-8"?>""" +
             """<Autodiscover xmlns="http://schemas.microsoft.com/exchange/autodiscover/outlook/requestschema/2006">""" +
             """<Request><EMailAddress>${esc(email.trim())}</EMailAddress>""" +
             """<AcceptableResponseSchema>http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a</AcceptableResponseSchema>""" +
             """</Request></Autodiscover>"""
-        for (host in listOf(domain, "autodiscover.$domain")) {
-            val url = "https://$host/autodiscover/autodiscover.xml"
-            val found = try {
+        val targets = urls ?: listOf(domain, "autodiscover.$domain").map { "https://$it/autodiscover/autodiscover.xml" }
+        for (url in targets) {
+            val result = try {
                 mutex.withLock {
                     http.newCall(Request.Builder().url(url).post(request.toRequestBody(XML)).build()).await().use { r ->
                         if (!r.isSuccessful) return@use null
-                        val root = withContext(Dispatchers.IO) { r.body?.byteStream()?.let(Xml::parse) } ?: return@use null
-                        val protocols = root.findAll("Protocol")
-                        // Внешний адрес (EXPR) подходит для телефона лучше внутреннего (EXCH)
-                        listOf("EXPR", "EXCH").firstNotNullOfOrNull { type ->
-                            protocols.firstOrNull { it.text("Type") == type }?.text("EwsUrl")
-                        } ?: root.find("EwsUrl")?.text
+                        withContext(Dispatchers.IO) { r.body?.byteStream()?.let(Xml::parse) }?.let(::parseAutodiscover)
                     }
                 }
             } catch (e: CancellationException) {
@@ -281,7 +290,14 @@ class EwsClient(
             } catch (_: Exception) {
                 null
             }
-            if (!found.isNullOrBlank()) return found.trim()
+            when (result) {
+                is AutodiscoverResult.Found -> return result.ewsUrl
+                is AutodiscoverResult.RedirectAddress ->
+                    if (!result.email.equals(email.trim(), true)) return autodiscover(result.email, null, depth + 1)
+                is AutodiscoverResult.RedirectUrl ->
+                    if (result.url.startsWith("https://", true) && result.url != url) return autodiscover(email, listOf(result.url), depth + 1)
+                null -> Unit
+            }
         }
         return null
     }
@@ -1013,6 +1029,21 @@ class EwsClient(
                 .map { (it.attr("Key") ?: "") to it.text.trim() }
 
         /** OkHttp-клиент с NTLM: только HTTP/1.1, одно переиспользуемое соединение. */
+        /** Ответ Autodiscover POX: адрес EWS или переадресация. */
+        internal fun parseAutodiscover(root: XmlNode): AutodiscoverResult? {
+            val account = root.find("Account")
+            when (account?.text("Action")?.trim()) {
+                "redirectAddr" -> account.text("RedirectAddr")?.trim()?.takeIf { '@' in it }?.let { return AutodiscoverResult.RedirectAddress(it) }
+                "redirectUrl" -> account.text("RedirectUrl")?.trim()?.takeIf { it.isNotEmpty() }?.let { return AutodiscoverResult.RedirectUrl(it) }
+            }
+            val protocols = root.findAll("Protocol")
+            // Внешний адрес (EXPR) подходит для телефона лучше внутреннего (EXCH)
+            val url = listOf("EXPR", "EXCH").firstNotNullOfOrNull { type ->
+                protocols.firstOrNull { it.text("Type") == type }?.text("EwsUrl")?.trim()?.takeIf { it.isNotEmpty() }
+            } ?: root.find("EwsUrl")?.text?.trim()?.takeIf { it.isNotEmpty() }
+            return url?.let { AutodiscoverResult.Found(it) }
+        }
+
         /** Клиент для проверки адреса сервера: без учётных данных и с короткими таймаутами. */
         private val probeHttp: OkHttpClient by lazy {
             OkHttpClient.Builder()

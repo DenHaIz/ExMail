@@ -202,10 +202,11 @@ fun HtmlView(
                         // иначе письмо само откроет сайт, например фишинговый
                         if (!request.hasGesture() || request.isRedirect) return true
                         val url = request.url
-                        if (url.scheme.equals("mailto", true)) {
-                            mailto(url.schemeSpecificPart.substringBefore('?'))
-                        } else {
-                            runCatching { view.context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url.toString()))) }
+                        when (url.scheme?.lowercase()) {
+                            "mailto" -> mailto(url.schemeSpecificPart.substringBefore('?'))
+                            // Только веб-ссылки и телефон: intent:, content:, file: и схемы других приложений из письма не открываются
+                            "http", "https", "tel" ->
+                                runCatching { view.context.startActivity(Intent(Intent.ACTION_VIEW, url).addCategory(Intent.CATEGORY_BROWSABLE)) }
                         }
                         return true
                     }
